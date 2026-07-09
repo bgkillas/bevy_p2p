@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 #[derive(Clone, Copy)]
 pub union PeerId {
     #[cfg(feature = "steam")]
@@ -17,7 +18,22 @@ impl PartialEq for PeerId {
     }
     #[cfg(not(any(feature = "steam", feature = "iroh")))]
     fn eq(&self, other: &Self) -> bool {
-        true
+        unreachable!()
+    }
+}
+impl Eq for PeerId {}
+impl Hash for PeerId {
+    #[cfg(any(not(feature = "steam"), feature = "iroh"))]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.iroh().hash(state);
+    }
+    #[cfg(all(feature = "steam", not(feature = "iroh")))]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.steam().hash(state);
+    }
+    #[cfg(not(any(feature = "steam", feature = "iroh")))]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unreachable!()
     }
 }
 #[cfg(feature = "iroh")]
@@ -35,21 +51,15 @@ impl From<steamworks::SteamId> for PeerId {
 impl Debug for PeerId {
     #[cfg(any(not(feature = "steam"), feature = "iroh"))]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let bytes =
-            unsafe { std::mem::transmute_copy::<[u8; 32], [u64; 4]>(self.iroh().as_bytes()) };
-        write!(
-            f,
-            "{:x}-{:x}-{:x}-{:x}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        )
+        write!(f, "{:?}", self.iroh())
     }
     #[cfg(all(feature = "steam", not(feature = "iroh")))]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}", self.steam())
+        write!(f, "{:?}", self.steam())
     }
     #[cfg(not(any(feature = "steam", feature = "iroh")))]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "")
+        unreachable!()
     }
 }
 impl PeerId {

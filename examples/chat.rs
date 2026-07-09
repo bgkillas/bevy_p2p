@@ -3,7 +3,7 @@ use bevy::app::{App, FixedUpdate};
 use bevy_app::Startup;
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::resource::Resource;
-use bevy_ecs::system::{Commands, Res};
+use bevy_ecs::system::Res;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{MessageReceived, Net};
 use bevy_p2p::plugin::P2PPlugin;
@@ -31,17 +31,18 @@ fn main() {
     app.add_plugins(MinimalPlugins);
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.add_plugins(TokioTasksPlugin::default());
-    app.world_mut().trigger(IrohBind);
+    if let Some(Ok(endpoint)) = args().nth(1).map(|e| EndpointId::from_str(&e)) {
+        app.world_mut().trigger(IrohConnect::new(endpoint));
+    } else {
+        app.world_mut().trigger(IrohBind);
+    }
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
     app.add_systems(FixedUpdate, (update, receive_message));
     app.run();
 }
-fn startup(iroh: Res<IrohResource<Msg>>, mut commands: Commands) {
+fn startup(iroh: Res<IrohResource<Msg>>) {
     println!("{}", iroh.router.endpoint().id());
-    if let Some(Ok(endpoint)) = args().nth(1).map(|e| EndpointId::from_str(&e)) {
-        commands.trigger(IrohConnect::new(endpoint));
-    }
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
