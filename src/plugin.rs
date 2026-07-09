@@ -1,5 +1,5 @@
 use crate::message::{MessageBroadcast, MessageReceived, MessageTo, P2PMessage};
-use bevy_app::{App, FixedUpdate, Plugin};
+use bevy_app::{App, FixedPreUpdate, Plugin};
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
 pub struct P2PPlugin<T: P2PMessage> {
@@ -34,14 +34,7 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
         app.add_message::<MessageReceived<T>>();
         #[cfg(feature = "iroh")]
         {
-            app.add_systems(
-                FixedUpdate,
-                (
-                    crate::iroh::message_to::<T>,
-                    crate::iroh::message_broadcast::<T>,
-                    crate::iroh::receive_messages::<T>,
-                ),
-            );
+            app.add_systems(FixedPreUpdate, crate::iroh::receive_messages::<T>);
             app.add_observer(crate::iroh::on_bind::<T>);
             app.add_observer(crate::iroh::on_unbind::<T>);
             app.add_observer(crate::iroh::on_connect::<T>);

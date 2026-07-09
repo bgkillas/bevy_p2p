@@ -4,7 +4,7 @@ use bevy_ecs::system::SystemParam;
 use bitcode::{DecodeOwned, Encode};
 #[derive(Message)]
 pub struct MessageTo<T: P2PMessage> {
-    pub peer_id: PeerId,
+    pub peer: PeerId,
     pub message: T,
 }
 #[derive(Message)]
@@ -17,8 +17,8 @@ pub struct Net<'w, T: P2PMessage> {
     pub message_broadcast: MessageWriter<'w, MessageBroadcast<T>>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer_id: PeerId, message: T) {
-        self.message_to.write(MessageTo { peer_id, message });
+    pub fn send(&mut self, peer: PeerId, message: T) {
+        self.message_to.write(MessageTo { peer, message });
     }
     pub fn broadcast(&mut self, message: T) {
         self.message_broadcast.write(MessageBroadcast { message });
