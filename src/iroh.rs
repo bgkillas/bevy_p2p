@@ -8,7 +8,7 @@ use bevy_ecs::system::{Commands, If, ResMut};
 use bevy_log::info;
 use bevy_tokio_tasks::TokioTasksRuntime;
 use bevy_tokio_tasks::tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bevy_tokio_tasks::tokio::sync::Mutex;
+use bevy_tokio_tasks::tokio::sync::mpsc;
 use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
 use bitcode::Buffer;
 use iroh::endpoint::presets::N0;
@@ -17,13 +17,13 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
 const ALPN: &[u8] = b"bevy_p2p";
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub router: Router,
-    pub protocol: Arc<Protocol<T>>,
-    pub buffer: Buffer,
+    buffer: Buffer,
+    pub connections: FxHashMap<PeerId, (Connection, SendStream, Receiver<T>)>,
+    receiver: Receiver<(Connection, SendStream, Receiver<T>)>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -62,15 +62,17 @@ impl<T: P2PMessage> IrohResource<T> {
     pub fn bind(runtime: &mut TokioTasksRuntime) -> Self {
         runtime.runtime().block_on(async {
             let endpoint = Endpoint::bind(N0).await.unwrap();
-            let protocol = Arc::new(Protocol::default());
+            let (tx, receiver) = mpsc::channel(256);
             let router = Router::builder(endpoint)
-                .accept(ALPN, protocol.clone())
+                .accept(ALPN, Protocol::new(tx))
                 .spawn();
             let buffer = Buffer::new();
+            let connections = FxHashMap::with_capacity_and_hasher(256, FxBuildHasher);
             Self {
                 router,
-                protocol,
                 buffer,
+                connections,
+                receiver,
             }
         })
     }
@@ -81,12 +83,9 @@ impl<T: P2PMessage> IrohResource<T> {
             let (mut send, recv) = connection.open_bi().await.unwrap();
             send.write(&[]).await.unwrap();
             info!("connected: {}", connection.remote_id());
-            let (tx, rx) = bevy_tokio_tasks::tokio::sync::mpsc::channel(256);
+            let (tx, rx) = mpsc::channel(256);
             bevy_tokio_tasks::tokio::spawn(receive(recv, tx));
-            self.protocol
-                .peers
-                .lock()
-                .await
+            self.connections
                 .insert(PeerId::from(connection.remote_id()), (connection, send, rx));
         });
     }
@@ -98,7 +97,7 @@ impl<T: P2PMessage> IrohResource<T> {
         runtime.runtime().block_on(async {
             for msg in msgs {
                 let bytes = self.buffer.encode(msg);
-                for (_, send, _) in self.protocol.peers.lock().await.values_mut() {
+                for (_, send, _) in self.connections.values_mut() {
                     send.write_u32(bytes.len() as u32).await.unwrap();
                     send.write(bytes).await.unwrap();
                 }
@@ -111,9 +110,8 @@ impl<T: P2PMessage> IrohResource<T> {
         msgs: impl Iterator<Item = (PeerId, &'a T)>,
     ) {
         runtime.runtime().block_on(async {
-            let mut peers = self.protocol.peers.lock().await;
             for (peer, msg) in msgs {
-                if let Some((_, send, _)) = peers.get_mut(&peer) {
+                if let Some((_, send, _)) = self.connections.get_mut(&peer) {
                     let bytes = self.buffer.encode(msg);
                     send.write_u32(bytes.len() as u32).await.unwrap();
                     send.write(bytes).await.unwrap();
@@ -123,7 +121,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub fn receive(&mut self, runtime: &mut TokioTasksRuntime, mut f: impl FnMut(EndpointId, T)) {
         runtime.runtime().block_on(async {
-            for (conn, _, recv) in self.protocol.peers.lock().await.values_mut() {
+            for (conn, _, recv) in self.connections.values_mut() {
                 let peer = conn.remote_id();
                 while let Ok(val) = recv.try_recv() {
                     f(peer, val);
@@ -132,20 +130,17 @@ impl<T: P2PMessage> IrohResource<T> {
         });
     }
 }
-#[allow(clippy::type_complexity)]
-pub struct Protocol<T: P2PMessage> {
-    pub peers: Mutex<FxHashMap<PeerId, (Connection, SendStream, Receiver<T>)>>,
+struct Protocol<T: P2PMessage> {
+    pub sender: Sender<(Connection, SendStream, Receiver<T>)>,
 }
 impl<T: P2PMessage> Debug for Protocol<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Protocol()")
+        write!(f, "Protocol({:?})", self.sender)
     }
 }
-impl<T: P2PMessage> Default for Protocol<T> {
-    fn default() -> Self {
-        Self {
-            peers: Mutex::new(FxHashMap::with_capacity_and_hasher(256, FxBuildHasher)),
-        }
+impl<T: P2PMessage> Protocol<T> {
+    fn new(sender: Sender<(Connection, SendStream, Receiver<T>)>) -> Self {
+        Self { sender }
     }
 }
 async fn receive<T: P2PMessage>(mut recv: RecvStream, send: Sender<T>) {
@@ -165,12 +160,9 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (send, recv) = connection.accept_bi().await?;
         info!("connected: {}", connection.remote_id());
-        let (tx, rx) = bevy_tokio_tasks::tokio::sync::mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(256);
         bevy_tokio_tasks::tokio::spawn(receive(recv, tx));
-        self.peers
-            .lock()
-            .await
-            .insert(PeerId::from(connection.remote_id()), (connection, send, rx));
+        self.sender.send((connection, send, rx)).await.unwrap();
         Ok(())
     }
 }
@@ -193,6 +185,11 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
     mut iroh: If<ResMut<IrohResource<T>>>,
 ) {
+    while let Ok((connection, reciever, sender)) = iroh.receiver.try_recv() {
+        let peer = PeerId::from(connection.remote_id());
+        iroh.connections
+            .insert(peer, (connection, reciever, sender));
+    }
     iroh.receive(&mut tokio, |peer, message| {
         writer.write(MessageReceived {
             peer: PeerId::from(peer),
