@@ -37,7 +37,7 @@ fn main() {
     app.add_systems(FixedUpdate, (update, receive_message));
     app.run();
 }
-fn startup(iroh: Res<IrohResource>, mut commands: Commands) {
+fn startup(iroh: Res<IrohResource<Msg>>, mut commands: Commands) {
     println!("{}", iroh.router.endpoint().id());
     if let Some(Ok(endpoint)) = args().nth(1).map(|e| EndpointId::from_str(&e)) {
         commands.trigger(IrohConnect::new(endpoint));
@@ -45,7 +45,6 @@ fn startup(iroh: Res<IrohResource>, mut commands: Commands) {
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        println!("sending: {line}");
         net.broadcast(Msg::Chat(line))
     }
 }
