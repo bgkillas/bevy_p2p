@@ -749,6 +749,7 @@ dependencies = [
  "bevy_log",
  "bitcode",
  "iroh",
+ "rand",
  "steamworks",
 ]
 

@@ -9,7 +9,7 @@ repository = "https://github.com/bgkillas/bevy_p2p"
 [features]
 default=["iroh", "example"]
 steam=["dep:steamworks"]
-iroh=["dep:iroh"]
+iroh=["dep:iroh", "dep:rand"]
 example=["dep:bevy"]
 
 [dependencies]
@@ -20,4 +20,5 @@ bevy_app = {version = "0.19.0", default-features = false}
 bevy_log = {version = "0.19.0", default-features = false}
 bevy-tokio-tasks = "0.19.0"
 bitcode = "0.6.9"
+rand = {version = "0.10.2", optional = true}
 bevy = {version = "0.19.0", default-features=false, features = ["debug"], optional = true}

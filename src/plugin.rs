@@ -43,6 +43,7 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
                 ),
             );
             app.add_observer(crate::iroh::on_bind);
+            app.add_observer(crate::iroh::on_connect);
         }
     }
 }
