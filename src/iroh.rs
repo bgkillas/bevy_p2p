@@ -4,7 +4,8 @@ use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::{MessageWriter, PopulatedMessageReader};
 use bevy_ecs::observer::On;
-use bevy_ecs::system::{Commands, If, ResMut};
+use bevy_ecs::system::{Commands, If, Res, ResMut};
+use bevy_ecs::world::World;
 use bevy_log::info;
 use bevy_tokio_tasks::TokioTasksRuntime;
 use bevy_tokio_tasks::tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,14 +38,14 @@ impl IrohConnect {
 pub(crate) fn on_connect<T: P2PMessage>(
     event: On<IrohConnect>,
     mut commands: Commands,
-    mut tokio: ResMut<TokioTasksRuntime>,
+    tokio: Res<TokioTasksRuntime>,
     iroh_opt: Option<ResMut<IrohResource<T>>>,
 ) {
     if let Some(mut iroh) = iroh_opt {
-        iroh.connect(&mut tokio, event.endpoint);
+        iroh.connect(&tokio, event.endpoint);
     } else {
-        let mut iroh = IrohResource::<T>::bind(&mut tokio);
-        iroh.connect(&mut tokio, event.endpoint);
+        let mut iroh = IrohResource::<T>::bind(&tokio);
+        iroh.connect(&tokio, event.endpoint);
         commands.insert_resource(iroh);
     }
 }
@@ -53,13 +54,29 @@ pub struct IrohBind;
 pub(crate) fn on_bind<T: P2PMessage>(
     _: On<IrohBind>,
     mut commands: Commands,
-    mut tokio: ResMut<TokioTasksRuntime>,
+    tokio: Res<TokioTasksRuntime>,
+    world: &World,
 ) {
-    let iroh = IrohResource::<T>::bind(&mut tokio);
-    commands.insert_resource(iroh);
+    if !world.is_resource_added::<IrohResource<T>>() {
+        let iroh = IrohResource::<T>::bind(&tokio);
+        commands.insert_resource(iroh);
+    }
+}
+#[derive(Event)]
+pub struct IrohUnbind;
+pub(crate) fn on_unbind<T: P2PMessage>(
+    _: On<IrohUnbind>,
+    mut commands: Commands,
+    tokio: Res<TokioTasksRuntime>,
+    iroh: If<ResMut<IrohResource<T>>>,
+) {
+    tokio
+        .runtime()
+        .block_on(async { iroh.router.shutdown().await.unwrap() });
+    commands.remove_resource::<IrohResource<T>>();
 }
 impl<T: P2PMessage> IrohResource<T> {
-    pub fn bind(runtime: &mut TokioTasksRuntime) -> Self {
+    pub fn bind(runtime: &TokioTasksRuntime) -> Self {
         runtime.runtime().block_on(async {
             let endpoint = Endpoint::bind(N0).await.unwrap();
             let (tx, receiver) = mpsc::channel(256);
@@ -76,7 +93,7 @@ impl<T: P2PMessage> IrohResource<T> {
             }
         })
     }
-    pub fn connect(&mut self, runtime: &mut TokioTasksRuntime, addr: EndpointId) {
+    pub fn connect(&mut self, runtime: &TokioTasksRuntime, addr: EndpointId) {
         runtime.runtime().block_on(async {
             let connection = self.router.endpoint().connect(addr, ALPN).await.unwrap();
             info!("connecting: {}", connection.remote_id());
@@ -91,7 +108,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub fn broadcast<'a>(
         &mut self,
-        runtime: &mut TokioTasksRuntime,
+        runtime: &TokioTasksRuntime,
         msgs: impl Iterator<Item = &'a T>,
     ) {
         runtime.runtime().block_on(async {
@@ -106,7 +123,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub fn send<'a>(
         &mut self,
-        runtime: &mut TokioTasksRuntime,
+        runtime: &TokioTasksRuntime,
         msgs: impl Iterator<Item = (PeerId, &'a T)>,
     ) {
         runtime.runtime().block_on(async {
@@ -119,7 +136,7 @@ impl<T: P2PMessage> IrohResource<T> {
             }
         });
     }
-    pub fn receive(&mut self, runtime: &mut TokioTasksRuntime, mut f: impl FnMut(EndpointId, T)) {
+    pub fn receive(&mut self, runtime: &TokioTasksRuntime, mut f: impl FnMut(EndpointId, T)) {
         runtime.runtime().block_on(async {
             for (conn, _, recv) in self.connections.values_mut() {
                 let peer = conn.remote_id();
@@ -167,21 +184,21 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     }
 }
 pub(crate) fn message_to<T: P2PMessage>(
-    mut tokio: ResMut<TokioTasksRuntime>,
+    tokio: Res<TokioTasksRuntime>,
     mut reader: PopulatedMessageReader<MessageTo<T>>,
     mut iroh: If<ResMut<IrohResource<T>>>,
 ) {
-    iroh.send(&mut tokio, reader.read().map(|m| (m.peer_id, &m.message)))
+    iroh.send(&tokio, reader.read().map(|m| (m.peer_id, &m.message)))
 }
 pub(crate) fn message_broadcast<T: P2PMessage>(
-    mut tokio: ResMut<TokioTasksRuntime>,
+    tokio: Res<TokioTasksRuntime>,
     mut reader: PopulatedMessageReader<MessageBroadcast<T>>,
     mut iroh: If<ResMut<IrohResource<T>>>,
 ) {
-    iroh.broadcast(&mut tokio, reader.read().map(|m| &m.message))
+    iroh.broadcast(&tokio, reader.read().map(|m| &m.message))
 }
 pub(crate) fn receive_messages<T: P2PMessage>(
-    mut tokio: ResMut<TokioTasksRuntime>,
+    tokio: Res<TokioTasksRuntime>,
     mut writer: MessageWriter<MessageReceived<T>>,
     mut iroh: If<ResMut<IrohResource<T>>>,
 ) {
@@ -190,7 +207,7 @@ pub(crate) fn receive_messages<T: P2PMessage>(
         iroh.connections
             .insert(peer, (connection, reciever, sender));
     }
-    iroh.receive(&mut tokio, |peer, message| {
+    iroh.receive(&tokio, |peer, message| {
         writer.write(MessageReceived {
             peer: PeerId::from(peer),
             message,
