@@ -1,4 +1,4 @@
-use crate::message::{MessageBroadcast, MessageReceived, MessageTo, P2PMessage};
+use crate::message::{MessageReceived, P2PMessage};
 use bevy_app::{App, FixedPreUpdate, Plugin};
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
@@ -29,8 +29,6 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
             }
             Err(err) => bevy_log::warn!("{err}"),
         }
-        app.add_message::<MessageTo<T>>();
-        app.add_message::<MessageBroadcast<T>>();
         app.add_message::<MessageReceived<T>>();
         #[cfg(feature = "iroh")]
         {

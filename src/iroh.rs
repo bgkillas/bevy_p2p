@@ -1,5 +1,5 @@
 use crate::id::PeerId;
-use crate::message::{MessageBroadcast, MessageReceived, MessageTo, P2PMessage};
+use crate::message::{MessageReceived, P2PMessage};
 use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
@@ -106,22 +106,19 @@ impl<T: P2PMessage> IrohResource<T> {
         self.connections
             .insert(PeerId::from(connection.remote_id()), (connection, send, rx));
     }
-    pub async fn broadcast(&mut self, msgs: impl Iterator<Item = MessageBroadcast<T>>) {
-        for msg in msgs {
-            let bytes = self.buffer.encode(&msg.message);
-            for (_, send, _) in self.connections.values_mut() {
-                send.write_u32(bytes.len() as u32).await.unwrap();
-                send.write(bytes).await.unwrap();
-            }
+    pub async fn broadcast(&mut self, msg: T) {
+        let bytes = self.buffer.encode(&msg);
+        for (_, send, _) in self.connections.values_mut() {
+            send.write_u32(bytes.len() as u32).await.unwrap();
+            send.write(bytes).await.unwrap();
         }
     }
-    pub async fn send(&mut self, msgs: impl Iterator<Item = MessageTo<T>>) {
-        for MessageTo { peer, message } in msgs {
-            if let Some((_, send, _)) = self.connections.get_mut(&peer) {
-                let bytes = self.buffer.encode(&message);
-                send.write_u32(bytes.len() as u32).await.unwrap();
-                send.write(bytes).await.unwrap();
-            }
+    pub async fn send(&mut self, peer: PeerId, msg: T) {
+        if let Some((_, send, _)) = self.connections.get_mut(&peer) {
+            let bytes = self.buffer.encode(&msg);
+            let len = u32::try_from(bytes.len()).unwrap();
+            send.write_u32(len).await.unwrap();
+            send.write(bytes).await.unwrap();
         }
     }
     pub fn receive(&mut self, mut f: impl FnMut(EndpointId, T)) {

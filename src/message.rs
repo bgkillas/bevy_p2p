@@ -1,27 +1,28 @@
 use crate::id::PeerId;
-use bevy_ecs::message::{Message, MessageWriter};
-use bevy_ecs::system::SystemParam;
+use crate::iroh::IrohResource;
+use bevy_ecs::message::Message;
+use bevy_ecs::system::{Res, ResMut, SystemParam};
+use bevy_tokio_tasks::TokioTasksRuntime;
 use bitcode::{DecodeOwned, Encode};
-#[derive(Message)]
-pub struct MessageTo<T: P2PMessage> {
-    pub peer: PeerId,
-    pub message: T,
-}
-#[derive(Message)]
-pub struct MessageBroadcast<T: P2PMessage> {
-    pub message: T,
-}
 #[derive(SystemParam)]
 pub struct Net<'w, T: P2PMessage> {
-    pub message_to: MessageWriter<'w, MessageTo<T>>,
-    pub message_broadcast: MessageWriter<'w, MessageBroadcast<T>>,
+    pub iroh: Option<ResMut<'w, IrohResource<T>>>,
+    pub tokio: Res<'w, TokioTasksRuntime>,
 }
 impl<T: P2PMessage> Net<'_, T> {
     pub fn send(&mut self, peer: PeerId, message: T) {
-        self.message_to.write(MessageTo { peer, message });
+        if let Some(iroh) = &mut self.iroh {
+            self.tokio.runtime().block_on(async {
+                iroh.send(peer, message).await;
+            });
+        }
     }
     pub fn broadcast(&mut self, message: T) {
-        self.message_broadcast.write(MessageBroadcast { message });
+        if let Some(iroh) = &mut self.iroh {
+            self.tokio.runtime().block_on(async {
+                iroh.broadcast(message).await;
+            });
+        }
     }
 }
 #[derive(Message)]
