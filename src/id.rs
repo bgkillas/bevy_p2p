@@ -8,32 +8,22 @@ pub union PeerId {
     iroh: iroh::EndpointId,
 }
 impl PartialEq for PeerId {
-    #[cfg(any(not(feature = "steam"), feature = "iroh"))]
     fn eq(&self, other: &Self) -> bool {
-        self.iroh() == other.iroh()
-    }
-    #[cfg(all(feature = "steam", not(feature = "iroh")))]
-    fn eq(&self, other: &Self) -> bool {
-        self.steam() == other.steam()
-    }
-    #[cfg(not(any(feature = "steam", feature = "iroh")))]
-    fn eq(&self, other: &Self) -> bool {
-        unreachable!()
+        cfg_select! {
+            feature = "iroh" => self.iroh() == other.iroh(),
+            feature = "steam" => self.steam() == other.steam(),
+            _ => unreachable!(),
+        }
     }
 }
 impl Eq for PeerId {}
 impl Hash for PeerId {
-    #[cfg(any(not(feature = "steam"), feature = "iroh"))]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.iroh().hash(state);
-    }
-    #[cfg(all(feature = "steam", not(feature = "iroh")))]
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.steam().hash(state);
-    }
-    #[cfg(not(any(feature = "steam", feature = "iroh")))]
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        unreachable!()
+        cfg_select! {
+            feature = "iroh" => self.iroh().hash(state),
+            feature = "steam" => self.steam().hash(state),
+            _ => unreachable!(),
+        }
     }
 }
 #[cfg(feature = "iroh")]
@@ -49,17 +39,12 @@ impl From<steamworks::SteamId> for PeerId {
     }
 }
 impl Debug for PeerId {
-    #[cfg(any(not(feature = "steam"), feature = "iroh"))]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.iroh())
-    }
-    #[cfg(all(feature = "steam", not(feature = "iroh")))]
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.steam())
-    }
-    #[cfg(not(any(feature = "steam", feature = "iroh")))]
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        unreachable!()
+        cfg_select! {
+            feature = "iroh" => Debug::fmt(&self.iroh(), f),
+            feature = "steam" => Debug::fmt(&self.steam(), f),
+            _ => unreachable!(),
+        }
     }
 }
 impl PeerId {

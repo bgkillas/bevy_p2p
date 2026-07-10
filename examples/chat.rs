@@ -4,6 +4,7 @@ use bevy_app::Startup;
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::Res;
+use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{MessageReceived, Net};
 use bevy_p2p::plugin::P2PPlugin;
@@ -32,7 +33,8 @@ fn main() {
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.add_plugins(TokioTasksPlugin::default());
     if let Some(Ok(endpoint)) = args().nth(1).map(|e| EndpointId::from_str(&e)) {
-        app.world_mut().trigger(IrohConnect::new(endpoint));
+        app.world_mut()
+            .trigger(IrohConnect::new(PeerId::from(endpoint)));
     } else {
         app.world_mut().trigger(IrohBind);
     }
