@@ -92,9 +92,9 @@ impl<T: P2PMessage> IrohResource<T> {
     pub async fn bind() -> Self {
         let endpoint = Endpoint::bind(N0).await.unwrap();
         let my_id = PeerId::from(endpoint.id());
-        let (new_tx, new_peers) = mpsc::channel(4096);
+        let (new_tx, new_peers) = mpsc::channel(8);
         let (message_tx, messages) = mpsc::channel(4096);
-        let (peer_tx, peer_relay) = mpsc::channel(4096);
+        let (peer_tx, peer_relay) = mpsc::channel(8);
         let messages_send = Arc::new(message_tx);
         let peer_relay_send = Arc::new(peer_tx);
         let router = Router::builder(endpoint)
@@ -125,7 +125,7 @@ impl<T: P2PMessage> IrohResource<T> {
             .await
             .unwrap();
         let (mut send, recv) = connection.open_bi().await.unwrap();
-        send.write(&[]).await.unwrap();
+        send.write_all(&[]).await.unwrap();
         let peer = PeerId::from(connection.remote_id());
         bevy_tokio_tasks::tokio::spawn(receive(
             peer,
@@ -154,7 +154,7 @@ impl<T: P2PMessage> IrohResource<T> {
             if !set.contains(peer) {
                 send.write_u8(MESSAGE_PEER_RELAY).await.unwrap();
                 send.write_u32(u32::try_from(len).unwrap()).await.unwrap();
-                send.write(buf).await.unwrap();
+                send.write_all(buf).await.unwrap();
             }
         }
     }
@@ -173,9 +173,11 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub async fn broadcast(&mut self, msg: T) {
         let bytes = self.buffer.encode(&msg);
+        let len = u32::try_from(bytes.len()).unwrap();
         for (_, send) in self.connections.values_mut() {
-            send.write_u32(bytes.len() as u32).await.unwrap();
-            send.write(bytes).await.unwrap();
+            send.write_u8(MESSAGE_MAIN).await.unwrap();
+            send.write_u32(len).await.unwrap();
+            send.write_all(bytes).await.unwrap();
         }
     }
     pub async fn send(&mut self, peer: PeerId, msg: T) {
@@ -184,7 +186,7 @@ impl<T: P2PMessage> IrohResource<T> {
             let len = u32::try_from(bytes.len()).unwrap();
             send.write_u8(MESSAGE_MAIN).await.unwrap();
             send.write_u32(len).await.unwrap();
-            send.write(bytes).await.unwrap();
+            send.write_all(bytes).await.unwrap();
         }
     }
 }
