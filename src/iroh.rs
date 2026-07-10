@@ -23,6 +23,7 @@ use std::sync::Arc;
 const ALPN: &[u8] = b"bevy_p2p";
 const MESSAGE_MAIN: u8 = 0;
 const MESSAGE_PEER_RELAY: u8 = 1;
+const MESSAGE_NONE: u8 = 2;
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub router: Router,
@@ -125,7 +126,8 @@ impl<T: P2PMessage> IrohResource<T> {
             .await
             .unwrap();
         let (mut send, recv) = connection.open_bi().await.unwrap();
-        send.write_all(&[]).await.unwrap();
+        send.write_u8(MESSAGE_NONE).await.unwrap();
+        send.write_u32(0).await.unwrap();
         let peer = PeerId::from(connection.remote_id());
         bevy_tokio_tasks::tokio::spawn(receive(
             peer,
@@ -140,20 +142,22 @@ impl<T: P2PMessage> IrohResource<T> {
             FxHashSet::<PeerId>::with_capacity_and_hasher(checked_peers.len() + 1, FxBuildHasher);
         set.insert(new_peer);
         set.extend(checked_peers);
-        let mut peers = Vec::with_capacity(self.connections.len() + 1);
+        let mut peers = Vec::with_capacity(self.connections.len() + 2);
         peers.push(new_peer);
+        peers.push(self.my_id);
         if self.connections.contains_key(&new_peer) {
             peers.extend(self.connections.keys().filter(|p| **p != new_peer));
         } else {
-            self.connect(new_peer).await;
             peers.extend(self.connections.keys());
+            self.connect(new_peer).await;
         }
         let (ptr, len, _) = peers.into_raw_parts();
         let buf = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len * size_of::<PeerId>()) };
+        let size = u32::try_from(len).unwrap();
         for (peer, (_, send)) in self.connections.iter_mut() {
             if !set.contains(peer) {
                 send.write_u8(MESSAGE_PEER_RELAY).await.unwrap();
-                send.write_u32(u32::try_from(len).unwrap()).await.unwrap();
+                send.write_u32(size - 1).await.unwrap();
                 send.write_all(buf).await.unwrap();
             }
         }
@@ -164,12 +168,12 @@ impl<T: P2PMessage> IrohResource<T> {
         }
     }
     pub async fn update(&mut self) {
-        self.relay_peers().await;
         while let Ok((connection, reciever)) = self.new_peers.try_recv() {
             let peer = PeerId::from(connection.remote_id());
             self.relay_peer(peer, &[]).await;
             self.connections.insert(peer, (connection, reciever));
         }
+        self.relay_peers().await;
     }
     pub async fn broadcast(&mut self, msg: T) {
         let bytes = self.buffer.encode(&msg);
@@ -236,7 +240,7 @@ async fn receive<T: P2PMessage>(
             }
             MESSAGE_PEER_RELAY => {
                 let mut peer_buf = [0; size_of::<PeerId>()];
-                let mut peers_buf = Vec::with_capacity(len * size_of::<PeerId>());
+                let mut peers_buf = vec![0; len * size_of::<PeerId>()];
                 recv.read_exact(&mut peer_buf).await.unwrap();
                 recv.read_exact(&mut peers_buf).await.unwrap();
                 let peer = unsafe { transmute::<[u8; size_of::<PeerId>()], PeerId>(peer_buf) };
@@ -253,6 +257,7 @@ async fn receive<T: P2PMessage>(
                     .await
                     .unwrap();
             }
+            MESSAGE_NONE => {}
             _ => unreachable!(),
         }
     }
