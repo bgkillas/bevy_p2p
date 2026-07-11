@@ -20,9 +20,6 @@ use std::fmt::{Debug, Formatter};
 use std::io;
 use std::sync::Arc;
 const ALPN: &[u8] = b"bevy_p2p";
-const MESSAGE_MAIN: u8 = 0;
-const MESSAGE_PEERS: u8 = 1;
-const MESSAGE_NONE: u8 = 2;
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub router: Router,
@@ -128,8 +125,7 @@ impl<T: P2PMessage> IrohResource<T> {
             .await
             .unwrap();
         let (mut send, recv) = connection.open_bi().await?;
-        send.write_u8(MESSAGE_NONE).await?;
-        send.write_u32(0).await?;
+        self.relay_peer(&mut send).await?;
         let peer = PeerId::from(connection.remote_id());
         bevy_tokio_tasks::tokio::spawn(receive(
             peer,
@@ -142,7 +138,6 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
         let len = u32::try_from(self.connections.len()).unwrap();
-        send.write_u8(MESSAGE_PEERS).await?;
         send.write_u32(len).await?;
         for peer in self.connections.keys() {
             send.write_all(peer.iroh().as_bytes()).await?;
@@ -166,7 +161,6 @@ impl<T: P2PMessage> IrohResource<T> {
         let bytes = self.buffer.encode(&msg);
         let len = u32::try_from(bytes.len()).unwrap();
         for (_, send) in self.connections.values_mut() {
-            send.write_u8(MESSAGE_MAIN).await?;
             send.write_u32(len).await?;
             send.write_all(bytes).await?;
         }
@@ -176,7 +170,6 @@ impl<T: P2PMessage> IrohResource<T> {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(&msg);
             let len = u32::try_from(bytes.len()).unwrap();
-            send.write_u8(MESSAGE_MAIN).await?;
             send.write_u32(len).await?;
             send.write_all(bytes).await?;
         }
@@ -212,37 +205,33 @@ async fn receive<T: P2PMessage>(
     send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Arc<Sender<Box<[PeerId]>>>,
 ) {
+    let Ok(size) = recv.read_u32().await else {
+        unreachable!();
+    };
+    if size != 0 {
+        let len = size as usize;
+        let mut peers_buf = vec![0; len * size_of::<PeerId>()];
+        recv.read_exact(&mut peers_buf).await.unwrap();
+        let (ptr, len, cap) = peers_buf.into_raw_parts();
+        let peers = unsafe {
+            Vec::from_raw_parts(
+                ptr.cast::<PeerId>(),
+                len / size_of::<PeerId>(),
+                cap / size_of::<PeerId>(),
+            )
+        };
+        peer_relay.send(peers.into_boxed_slice()).await.unwrap();
+    }
     let mut buffer = Buffer::new();
     let mut recv_buffer = Vec::new();
-    while let Ok(message_type) = recv.read_u8().await
-        && let Ok(size) = recv.read_u32().await
-    {
+    while let Ok(size) = recv.read_u32().await {
         let len = size as usize;
-        match message_type {
-            MESSAGE_MAIN => {
-                if len > recv_buffer.len() {
-                    recv_buffer.resize(len, 0);
-                }
-                recv.read_exact(&mut recv_buffer[..len]).await.unwrap();
-                let val = buffer.decode(&recv_buffer[..len]).unwrap();
-                send.send((peer, val)).await.unwrap();
-            }
-            MESSAGE_PEERS => {
-                let mut peers_buf = vec![0; len * size_of::<PeerId>()];
-                recv.read_exact(&mut peers_buf).await.unwrap();
-                let (ptr, len, cap) = peers_buf.into_raw_parts();
-                let peers = unsafe {
-                    Vec::from_raw_parts(
-                        ptr.cast::<PeerId>(),
-                        len / size_of::<PeerId>(),
-                        cap / size_of::<PeerId>(),
-                    )
-                };
-                peer_relay.send(peers.into_boxed_slice()).await.unwrap();
-            }
-            MESSAGE_NONE => {}
-            _ => unreachable!(),
+        if len > recv_buffer.len() {
+            recv_buffer.resize(len, 0);
         }
+        recv.read_exact(&mut recv_buffer[..len]).await.unwrap();
+        let val = buffer.decode(&recv_buffer[..len]).unwrap();
+        send.send((peer, val)).await.unwrap();
     }
 }
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
