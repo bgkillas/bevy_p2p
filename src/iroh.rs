@@ -15,14 +15,13 @@ use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::fmt::{Debug, Formatter};
-use std::mem::transmute;
+use std::io;
 use std::sync::Arc;
-use std::{io, slice};
 const ALPN: &[u8] = b"bevy_p2p";
 const MESSAGE_MAIN: u8 = 0;
-const MESSAGE_PEER_RELAY: u8 = 1;
+const MESSAGE_PEERS: u8 = 1;
 const MESSAGE_NONE: u8 = 2;
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
@@ -33,8 +32,8 @@ pub struct IrohResource<T: P2PMessage> {
     messages: Receiver<(PeerId, T)>,
     messages_send: Arc<Sender<(PeerId, T)>>,
     new_peers: Receiver<(Connection, SendStream)>,
-    peer_relay: Receiver<(PeerId, Box<[PeerId]>)>,
-    peer_relay_send: Arc<Sender<(PeerId, Box<[PeerId]>)>>,
+    peer_relay: Receiver<Box<[PeerId]>>,
+    peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -119,6 +118,9 @@ impl<T: P2PMessage> IrohResource<T> {
         })
     }
     pub async fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
+        if self.connections.contains_key(&peer) {
+            return Ok(());
+        }
         let connection = self
             .router
             .endpoint()
@@ -138,49 +140,26 @@ impl<T: P2PMessage> IrohResource<T> {
         self.connections.insert(peer, (connection, send));
         Ok(())
     }
-    pub async fn relay_peer(
-        &mut self,
-        new_peer: PeerId,
-        checked_peers: &[PeerId],
-    ) -> Result<(), io::Error> {
-        let mut set =
-            FxHashSet::<PeerId>::with_capacity_and_hasher(checked_peers.len() + 1, FxBuildHasher);
-        set.insert(new_peer);
-        set.extend(checked_peers);
-        let mut peers = Vec::with_capacity(self.connections.len() + 2);
-        peers.push(new_peer);
-        peers.push(self.my_id);
-        if self.connections.contains_key(&new_peer) {
-            peers.extend(self.connections.keys().filter(|p| **p != new_peer));
-        } else {
-            peers.extend(self.connections.keys());
-            self.connect(new_peer).await?;
-        }
-        let (ptr, len, _) = peers.into_raw_parts();
-        let buf = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len * size_of::<PeerId>()) };
-        let size = u32::try_from(len).unwrap();
-        for (peer, (_, send)) in self.connections.iter_mut() {
-            if !set.contains(peer) {
-                send.write_u8(MESSAGE_PEER_RELAY).await?;
-                send.write_u32(size - 1).await?;
-                send.write_all(buf).await?;
-            }
-        }
-        Ok(())
-    }
-    pub async fn relay_peers(&mut self) -> Result<(), io::Error> {
-        while let Ok((peer, peers)) = self.peer_relay.try_recv() {
-            self.relay_peer(peer, &peers).await?;
+    pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
+        let len = u32::try_from(self.connections.len()).unwrap();
+        send.write_u8(MESSAGE_PEERS).await?;
+        send.write_u32(len).await?;
+        for peer in self.connections.keys() {
+            send.write_all(peer.iroh().as_bytes()).await?;
         }
         Ok(())
     }
     pub async fn update(&mut self) -> Result<(), io::Error> {
-        while let Ok((connection, reciever)) = self.new_peers.try_recv() {
+        while let Ok((connection, mut send)) = self.new_peers.try_recv() {
+            self.relay_peer(&mut send).await?;
             let peer = PeerId::from(connection.remote_id());
-            self.relay_peer(peer, &[]).await?;
-            self.connections.insert(peer, (connection, reciever));
+            self.connections.insert(peer, (connection, send));
         }
-        self.relay_peers().await?;
+        while let Ok(peers) = self.peer_relay.try_recv() {
+            for peer in peers {
+                self.connect(peer).await?;
+            }
+        }
         Ok(())
     }
     pub async fn broadcast(&mut self, msg: T) -> Result<(), io::Error> {
@@ -207,7 +186,7 @@ impl<T: P2PMessage> IrohResource<T> {
 struct Protocol<T: P2PMessage> {
     pub sender: Sender<(Connection, SendStream)>,
     pub messages: Arc<Sender<(PeerId, T)>>,
-    pub peer_relay: Arc<Sender<(PeerId, Box<[PeerId]>)>>,
+    pub peer_relay: Arc<Sender<Box<[PeerId]>>>,
 }
 impl<T: P2PMessage> Debug for Protocol<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -218,7 +197,7 @@ impl<T: P2PMessage> Protocol<T> {
     fn new(
         sender: Sender<(Connection, SendStream)>,
         messages: Arc<Sender<(PeerId, T)>>,
-        peer_relay: Arc<Sender<(PeerId, Box<[PeerId]>)>>,
+        peer_relay: Arc<Sender<Box<[PeerId]>>>,
     ) -> Self {
         Self {
             sender,
@@ -231,7 +210,7 @@ async fn receive<T: P2PMessage>(
     peer: PeerId,
     mut recv: RecvStream,
     send: Arc<Sender<(PeerId, T)>>,
-    peer_relay: Arc<Sender<(PeerId, Box<[PeerId]>)>>,
+    peer_relay: Arc<Sender<Box<[PeerId]>>>,
 ) {
     let mut buffer = Buffer::new();
     let mut recv_buffer = Vec::new();
@@ -248,12 +227,9 @@ async fn receive<T: P2PMessage>(
                 let val = buffer.decode(&recv_buffer[..len]).unwrap();
                 send.send((peer, val)).await.unwrap();
             }
-            MESSAGE_PEER_RELAY => {
-                let mut peer_buf = [0; size_of::<PeerId>()];
+            MESSAGE_PEERS => {
                 let mut peers_buf = vec![0; len * size_of::<PeerId>()];
-                recv.read_exact(&mut peer_buf).await.unwrap();
                 recv.read_exact(&mut peers_buf).await.unwrap();
-                let peer = unsafe { transmute::<[u8; size_of::<PeerId>()], PeerId>(peer_buf) };
                 let (ptr, len, cap) = peers_buf.into_raw_parts();
                 let peers = unsafe {
                     Vec::from_raw_parts(
@@ -262,10 +238,7 @@ async fn receive<T: P2PMessage>(
                         cap / size_of::<PeerId>(),
                     )
                 };
-                peer_relay
-                    .send((peer, peers.into_boxed_slice()))
-                    .await
-                    .unwrap();
+                peer_relay.send(peers.into_boxed_slice()).await.unwrap();
             }
             MESSAGE_NONE => {}
             _ => unreachable!(),

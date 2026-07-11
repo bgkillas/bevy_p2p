@@ -11,7 +11,6 @@ use bevy_p2p::plugin::P2PPlugin;
 use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
 use iroh::EndpointId;
-use std::env::args;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write, stdin};
 use std::str::FromStr;
@@ -33,12 +32,7 @@ fn main() {
     app.add_plugins(MinimalPlugins);
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.add_plugins(TokioTasksPlugin::default());
-    if let Some(Ok(endpoint)) = args().nth(1).map(|e| EndpointId::from_str(&e)) {
-        app.world_mut()
-            .trigger(IrohConnect::new(PeerId::from(endpoint)));
-    } else {
-        app.world_mut().trigger(IrohBind);
-    }
+    app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
     app.add_systems(FixedUpdate, (update, receive_message));
