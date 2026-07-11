@@ -58,7 +58,7 @@ fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(Msg::Chat(line)).unwrap()
+        net.broadcast(&Msg::Chat(line)).unwrap()
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {

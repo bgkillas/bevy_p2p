@@ -12,13 +12,13 @@ pub struct Net<'w, T: P2PMessage> {
     pub tokio: Res<'w, TokioTasksRuntime>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer: PeerId, message: T) -> Result<(), io::Error> {
+    pub fn send(&mut self, peer: PeerId, message: &T) -> Result<(), io::Error> {
         if let Some(ir) = &mut self.iroh {
             self.tokio.runtime().block_on(ir.send(peer, message))?;
         }
         Ok(())
     }
-    pub fn broadcast(&mut self, message: T) -> Result<(), io::Error> {
+    pub fn broadcast(&mut self, message: &T) -> Result<(), io::Error> {
         if let Some(ir) = &mut self.iroh {
             self.tokio.runtime().block_on(ir.broadcast(message))?;
         }

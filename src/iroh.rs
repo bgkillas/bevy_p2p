@@ -174,8 +174,8 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         Ok(())
     }
-    pub async fn broadcast(&mut self, msg: T) -> Result<(), io::Error> {
-        let bytes = self.buffer.encode(&msg);
+    pub async fn broadcast(&mut self, msg: &T) -> Result<(), io::Error> {
+        let bytes = self.buffer.encode(msg);
         let len = u32::try_from(bytes.len()).unwrap();
         for (_, send) in self.connections.values_mut() {
             send.write_all(len.as_bytes()).await?;
@@ -183,9 +183,9 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         Ok(())
     }
-    pub async fn send(&mut self, peer: PeerId, msg: T) -> Result<(), io::Error> {
+    pub async fn send(&mut self, peer: PeerId, msg: &T) -> Result<(), io::Error> {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
-            let bytes = self.buffer.encode(&msg);
+            let bytes = self.buffer.encode(msg);
             let len = u32::try_from(bytes.len()).unwrap();
             send.write_all(len.as_bytes()).await?;
             send.write_all(bytes).await?;
