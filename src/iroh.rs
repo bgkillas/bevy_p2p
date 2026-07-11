@@ -6,15 +6,15 @@ use bevy_ecs::message::MessageWriter;
 use bevy_ecs::observer::On;
 use bevy_ecs::system::{Commands, If, Res, ResMut};
 use bevy_ecs::world::World;
-use bevy_tokio_tasks::TokioTasksRuntime;
 use bevy_tokio_tasks::tokio::sync::mpsc;
 use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
+use bevy_tokio_tasks::{TokioTasksRuntime, tokio};
 use bitcode::Buffer;
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::sync::Arc;
@@ -24,9 +24,11 @@ const ALPN: &[u8] = b"bevy_p2p";
 pub struct IrohResource<T: P2PMessage> {
     pub router: Router,
     pub connections: FxHashMap<PeerId, (Connection, SendStream)>,
+    pub pending: FxHashSet<PeerId>,
     pub my_id: PeerId,
     buffer: Buffer,
     new_peers: Receiver<(Connection, SendStream)>,
+    new_peers_send: Arc<Sender<(Connection, SendStream)>>,
     messages: Receiver<(PeerId, T)>,
     messages_send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Receiver<Box<[PeerId]>>,
@@ -51,10 +53,10 @@ pub(crate) fn on_connect<T: P2PMessage>(
     tokio.runtime().block_on(async {
         if let Err(e) = try {
             if let Some(mut iroh) = iroh_opt {
-                iroh.connect(event.peer).await?;
+                iroh.connect(event.peer)?;
             } else {
                 let mut iroh = IrohResource::<T>::bind().await.unwrap();
-                iroh.connect(event.peer).await?;
+                iroh.connect(event.peer)?;
                 commands.insert_resource(iroh);
             }
         } {
@@ -94,66 +96,80 @@ impl<T: P2PMessage> IrohResource<T> {
         let (message_tx, messages) = mpsc::channel(4096);
         let (peer_tx, peer_relay) = mpsc::channel(8);
         let messages_send = Arc::new(message_tx);
+        let new_peers_send = Arc::new(new_tx);
         let peer_relay_send = Arc::new(peer_tx);
         let router = Router::builder(endpoint)
             .accept(
                 ALPN,
-                Protocol::new(new_tx, messages_send.clone(), peer_relay_send.clone()),
+                Protocol::new(
+                    new_peers_send.clone(),
+                    messages_send.clone(),
+                    peer_relay_send.clone(),
+                ),
             )
             .spawn();
         let buffer = Buffer::new();
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
+        let pending = FxHashSet::with_capacity_and_hasher(8, FxBuildHasher);
         Ok(Self {
             router,
             connections,
+            pending,
             my_id,
             buffer,
             new_peers,
+            new_peers_send,
             messages,
             messages_send,
             peer_relay,
             peer_relay_send,
         })
     }
-    pub async fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
-        if self.connections.contains_key(&peer) {
+    pub fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
+        async fn connect<K: P2PMessage>(
+            peer: PeerId,
+            endpoint: Endpoint,
+            sender: Arc<Sender<(Connection, SendStream)>>,
+            messages_send: Arc<Sender<(PeerId, K)>>,
+            peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
+        ) {
+            if let Ok(connection) = endpoint.connect(peer.iroh(), ALPN).await {
+                let (send, recv) = connection.open_bi().await.unwrap();
+                tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
+                sender.send((connection, send)).await.unwrap();
+            }
+        }
+        if self.connections.contains_key(&peer) || self.pending.contains(&peer) {
             return Ok(());
         }
-        let connection = self
-            .router
-            .endpoint()
-            .connect(peer.iroh(), ALPN)
-            .await
-            .unwrap();
-        let (mut send, recv) = connection.open_bi().await?;
-        self.relay_peer(&mut send).await?;
-        let peer = PeerId::from(connection.remote_id());
-        bevy_tokio_tasks::tokio::spawn(receive(
+        self.pending.insert(peer);
+        tokio::spawn(connect(
             peer,
-            recv,
+            self.router.endpoint().clone(),
+            self.new_peers_send.clone(),
             self.messages_send.clone(),
             self.peer_relay_send.clone(),
         ));
-        self.connections.insert(peer, (connection, send));
         Ok(())
     }
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
         let len = u32::try_from(self.connections.len()).unwrap();
         send.write_all(len.as_bytes()).await?;
-        for peer in self.connections.keys() {
+        for peer in self.connections.keys().copied() {
             send.write_all(peer.iroh().as_bytes()).await?;
         }
         Ok(())
     }
     pub async fn update(&mut self) -> Result<(), io::Error> {
         while let Ok((connection, mut send)) = self.new_peers.try_recv() {
-            self.relay_peer(&mut send).await?;
             let peer = PeerId::from(connection.remote_id());
+            self.relay_peer(&mut send).await?;
             self.connections.insert(peer, (connection, send));
+            self.pending.remove(&peer);
         }
         while let Ok(peers) = self.peer_relay.try_recv() {
             for peer in peers {
-                self.connect(peer).await?;
+                self.connect(peer)?;
             }
         }
         Ok(())
@@ -178,7 +194,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
 }
 struct Protocol<T: P2PMessage> {
-    pub sender: Sender<(Connection, SendStream)>,
+    pub sender: Arc<Sender<(Connection, SendStream)>>,
     pub messages: Arc<Sender<(PeerId, T)>>,
     pub peer_relay: Arc<Sender<Box<[PeerId]>>>,
 }
@@ -189,7 +205,7 @@ impl<T: P2PMessage> Debug for Protocol<T> {
 }
 impl<T: P2PMessage> Protocol<T> {
     fn new(
-        sender: Sender<(Connection, SendStream)>,
+        sender: Arc<Sender<(Connection, SendStream)>>,
         messages: Arc<Sender<(PeerId, T)>>,
         peer_relay: Arc<Sender<Box<[PeerId]>>>,
     ) -> Self {
@@ -245,7 +261,7 @@ async fn receive<T: P2PMessage>(
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (send, recv) = connection.accept_bi().await?;
-        bevy_tokio_tasks::tokio::spawn(receive(
+        tokio::spawn(receive(
             PeerId::from(connection.remote_id()),
             recv,
             self.messages.clone(),
