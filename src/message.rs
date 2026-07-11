@@ -1,3 +1,4 @@
+#![allow(clippy::shadow_reuse)]
 use crate::id::PeerId;
 use crate::iroh::IrohResource;
 use bevy_ecs::message::Message;
@@ -12,14 +13,14 @@ pub struct Net<'w, T: P2PMessage> {
 }
 impl<T: P2PMessage> Net<'_, T> {
     pub fn send(&mut self, peer: PeerId, message: T) -> Result<(), io::Error> {
-        if let Some(iroh) = &mut self.iroh {
-            self.tokio.runtime().block_on(iroh.send(peer, message))?;
+        if let Some(ir) = &mut self.iroh {
+            self.tokio.runtime().block_on(ir.send(peer, message))?;
         }
         Ok(())
     }
     pub fn broadcast(&mut self, message: T) -> Result<(), io::Error> {
-        if let Some(iroh) = &mut self.iroh {
-            self.tokio.runtime().block_on(iroh.broadcast(message))?;
+        if let Some(ir) = &mut self.iroh {
+            self.tokio.runtime().block_on(ir.broadcast(message))?;
         }
         Ok(())
     }

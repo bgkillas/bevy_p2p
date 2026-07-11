@@ -12,6 +12,7 @@ pub struct P2PPlugin<T: P2PMessage> {
 }
 impl<T: P2PMessage> P2PPlugin<T> {
     #[allow(clippy::new_without_default)]
+    #[must_use]
     pub fn new(#[cfg(feature = "steam")] id: u32) -> Self {
         Self {
             #[cfg(feature = "steam")]

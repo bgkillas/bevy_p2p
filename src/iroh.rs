@@ -7,18 +7,18 @@ use bevy_ecs::observer::On;
 use bevy_ecs::system::{Commands, If, Res, ResMut};
 use bevy_ecs::world::World;
 use bevy_tokio_tasks::TokioTasksRuntime;
-use bevy_tokio_tasks::tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bevy_tokio_tasks::tokio::sync::mpsc;
 use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
 use bitcode::Buffer;
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
-use iroh::endpoint::{BindError, Connection, RecvStream, SendStream};
+use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::sync::Arc;
+use zerocopy::IntoBytes as _;
 const ALPN: &[u8] = b"bevy_p2p";
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
@@ -26,9 +26,9 @@ pub struct IrohResource<T: P2PMessage> {
     pub connections: FxHashMap<PeerId, (Connection, SendStream)>,
     pub my_id: PeerId,
     buffer: Buffer,
+    new_peers: Receiver<(Connection, SendStream)>,
     messages: Receiver<(PeerId, T)>,
     messages_send: Arc<Sender<(PeerId, T)>>,
-    new_peers: Receiver<(Connection, SendStream)>,
     peer_relay: Receiver<Box<[PeerId]>>,
     peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
 }
@@ -37,6 +37,7 @@ pub struct IrohConnect {
     pub peer: PeerId,
 }
 impl IrohConnect {
+    #[must_use]
     pub fn new(peer: PeerId) -> Self {
         Self { peer }
     }
@@ -103,10 +104,10 @@ impl<T: P2PMessage> IrohResource<T> {
         let buffer = Buffer::new();
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
         Ok(Self {
-            my_id,
             router,
-            buffer,
             connections,
+            my_id,
+            buffer,
             new_peers,
             messages,
             messages_send,
@@ -138,7 +139,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
         let len = u32::try_from(self.connections.len()).unwrap();
-        send.write_u32(len).await?;
+        send.write_all(len.as_bytes()).await?;
         for peer in self.connections.keys() {
             send.write_all(peer.iroh().as_bytes()).await?;
         }
@@ -161,7 +162,7 @@ impl<T: P2PMessage> IrohResource<T> {
         let bytes = self.buffer.encode(&msg);
         let len = u32::try_from(bytes.len()).unwrap();
         for (_, send) in self.connections.values_mut() {
-            send.write_u32(len).await?;
+            send.write_all(len.as_bytes()).await?;
             send.write_all(bytes).await?;
         }
         Ok(())
@@ -170,7 +171,7 @@ impl<T: P2PMessage> IrohResource<T> {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(&msg);
             let len = u32::try_from(bytes.len()).unwrap();
-            send.write_u32(len).await?;
+            send.write_all(len.as_bytes()).await?;
             send.write_all(bytes).await?;
         }
         Ok(())
@@ -199,39 +200,46 @@ impl<T: P2PMessage> Protocol<T> {
         }
     }
 }
+async fn read_u32(recv: &mut RecvStream) -> Result<u32, ReadExactError> {
+    let mut val = 0;
+    recv.read_exact(val.as_mut_bytes()).await?;
+    Ok(val)
+}
 async fn receive<T: P2PMessage>(
     peer: PeerId,
     mut recv: RecvStream,
     send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Arc<Sender<Box<[PeerId]>>>,
 ) {
-    let Ok(size) = recv.read_u32().await else {
-        unreachable!();
-    };
-    if size != 0 {
-        let len = size as usize;
-        let mut peers_buf = vec![0; len * size_of::<PeerId>()];
-        recv.read_exact(&mut peers_buf).await.unwrap();
-        let (ptr, len, cap) = peers_buf.into_raw_parts();
-        let peers = unsafe {
-            Vec::from_raw_parts(
-                ptr.cast::<PeerId>(),
-                len / size_of::<PeerId>(),
-                cap / size_of::<PeerId>(),
-            )
-        };
-        peer_relay.send(peers.into_boxed_slice()).await.unwrap();
-    }
-    let mut buffer = Buffer::new();
-    let mut recv_buffer = Vec::new();
-    while let Ok(size) = recv.read_u32().await {
-        let len = size as usize;
-        if len > recv_buffer.len() {
-            recv_buffer.resize(len, 0);
+    if let Err(e) = try {
+        let size = read_u32(&mut recv).await?;
+        if size != 0 {
+            let len = size as usize;
+            let mut peers_buf = vec![0; len * size_of::<PeerId>()];
+            recv.read_exact(&mut peers_buf).await?;
+            let (ptr, len, cap) = peers_buf.into_raw_parts();
+            let peers = unsafe {
+                Vec::from_raw_parts(
+                    ptr.cast::<PeerId>(),
+                    len / size_of::<PeerId>(),
+                    cap / size_of::<PeerId>(),
+                )
+            };
+            peer_relay.send(peers.into_boxed_slice()).await.unwrap();
         }
-        recv.read_exact(&mut recv_buffer[..len]).await.unwrap();
-        let val = buffer.decode(&recv_buffer[..len]).unwrap();
-        send.send((peer, val)).await.unwrap();
+        let mut buffer = Buffer::new();
+        let mut recv_buffer = Vec::new();
+        while let Ok(size) = read_u32(&mut recv).await {
+            let len = size as usize;
+            if len > recv_buffer.len() {
+                recv_buffer.resize(len, 0);
+            }
+            recv.read_exact(&mut recv_buffer[..len]).await?;
+            let val = buffer.decode(&recv_buffer[..len]).unwrap();
+            send.send((peer, val)).await.unwrap();
+        }
+    } {
+        panic!("{e:?}");
     }
 }
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
@@ -253,7 +261,7 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     tokio: Res<TokioTasksRuntime>,
 ) {
     if let Err(e) = tokio.runtime().block_on(iroh.update()) {
-        println!("{e:?}")
+        println!("{e:?}");
     }
     while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
