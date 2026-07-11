@@ -1,3 +1,4 @@
+#![feature(try_blocks)]
 pub mod id;
 #[cfg(not(feature = "steam"))]
 pub mod iroh;

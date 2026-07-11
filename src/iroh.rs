@@ -13,13 +13,13 @@ use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
 use bitcode::Buffer;
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{BindError, Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::mem::transmute;
-use std::slice;
 use std::sync::Arc;
+use std::{io, slice};
 const ALPN: &[u8] = b"bevy_p2p";
 const MESSAGE_MAIN: u8 = 0;
 const MESSAGE_PEER_RELAY: u8 = 1;
@@ -52,12 +52,16 @@ pub(crate) fn on_connect<T: P2PMessage>(
     iroh_opt: Option<ResMut<IrohResource<T>>>,
 ) {
     tokio.runtime().block_on(async {
-        if let Some(mut iroh) = iroh_opt {
-            iroh.connect(event.peer).await;
-        } else {
-            let mut iroh = IrohResource::<T>::bind().await;
-            iroh.connect(event.peer).await;
-            commands.insert_resource(iroh);
+        if let Err(e) = try {
+            if let Some(mut iroh) = iroh_opt {
+                iroh.connect(event.peer).await?;
+            } else {
+                let mut iroh = IrohResource::<T>::bind().await.unwrap();
+                iroh.connect(event.peer).await?;
+                commands.insert_resource(iroh);
+            }
+        } {
+            println!("{e:?}");
         }
     });
 }
@@ -70,10 +74,8 @@ pub(crate) fn on_bind<T: P2PMessage>(
     world: &World,
 ) {
     if !world.is_resource_added::<IrohResource<T>>() {
-        tokio.runtime().block_on(async {
-            let iroh = IrohResource::<T>::bind().await;
-            commands.insert_resource(iroh);
-        })
+        let iroh = tokio.runtime().block_on(IrohResource::<T>::bind()).unwrap();
+        commands.insert_resource(iroh);
     }
 }
 #[derive(Event)]
@@ -84,14 +86,12 @@ pub(crate) fn on_unbind<T: P2PMessage>(
     tokio: Res<TokioTasksRuntime>,
     iroh: If<ResMut<IrohResource<T>>>,
 ) {
-    tokio
-        .runtime()
-        .block_on(async { iroh.router.shutdown().await.unwrap() });
+    tokio.runtime().block_on(iroh.router.shutdown()).unwrap();
     commands.remove_resource::<IrohResource<T>>();
 }
 impl<T: P2PMessage> IrohResource<T> {
-    pub async fn bind() -> Self {
-        let endpoint = Endpoint::bind(N0).await.unwrap();
+    pub async fn bind() -> Result<Self, BindError> {
+        let endpoint = Endpoint::bind(N0).await?;
         let my_id = PeerId::from(endpoint.id());
         let (new_tx, new_peers) = mpsc::channel(8);
         let (message_tx, messages) = mpsc::channel(4096);
@@ -106,7 +106,7 @@ impl<T: P2PMessage> IrohResource<T> {
             .spawn();
         let buffer = Buffer::new();
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
-        Self {
+        Ok(Self {
             my_id,
             router,
             buffer,
@@ -116,18 +116,18 @@ impl<T: P2PMessage> IrohResource<T> {
             messages_send,
             peer_relay,
             peer_relay_send,
-        }
+        })
     }
-    pub async fn connect(&mut self, peer: PeerId) {
+    pub async fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
         let connection = self
             .router
             .endpoint()
             .connect(peer.iroh(), ALPN)
             .await
             .unwrap();
-        let (mut send, recv) = connection.open_bi().await.unwrap();
-        send.write_u8(MESSAGE_NONE).await.unwrap();
-        send.write_u32(0).await.unwrap();
+        let (mut send, recv) = connection.open_bi().await?;
+        send.write_u8(MESSAGE_NONE).await?;
+        send.write_u32(0).await?;
         let peer = PeerId::from(connection.remote_id());
         bevy_tokio_tasks::tokio::spawn(receive(
             peer,
@@ -136,8 +136,13 @@ impl<T: P2PMessage> IrohResource<T> {
             self.peer_relay_send.clone(),
         ));
         self.connections.insert(peer, (connection, send));
+        Ok(())
     }
-    pub async fn relay_peer(&mut self, new_peer: PeerId, checked_peers: &[PeerId]) {
+    pub async fn relay_peer(
+        &mut self,
+        new_peer: PeerId,
+        checked_peers: &[PeerId],
+    ) -> Result<(), io::Error> {
         let mut set =
             FxHashSet::<PeerId>::with_capacity_and_hasher(checked_peers.len() + 1, FxBuildHasher);
         set.insert(new_peer);
@@ -149,49 +154,54 @@ impl<T: P2PMessage> IrohResource<T> {
             peers.extend(self.connections.keys().filter(|p| **p != new_peer));
         } else {
             peers.extend(self.connections.keys());
-            self.connect(new_peer).await;
+            self.connect(new_peer).await?;
         }
         let (ptr, len, _) = peers.into_raw_parts();
         let buf = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len * size_of::<PeerId>()) };
         let size = u32::try_from(len).unwrap();
         for (peer, (_, send)) in self.connections.iter_mut() {
             if !set.contains(peer) {
-                send.write_u8(MESSAGE_PEER_RELAY).await.unwrap();
-                send.write_u32(size - 1).await.unwrap();
-                send.write_all(buf).await.unwrap();
+                send.write_u8(MESSAGE_PEER_RELAY).await?;
+                send.write_u32(size - 1).await?;
+                send.write_all(buf).await?;
             }
         }
+        Ok(())
     }
-    pub async fn relay_peers(&mut self) {
+    pub async fn relay_peers(&mut self) -> Result<(), io::Error> {
         while let Ok((peer, peers)) = self.peer_relay.try_recv() {
-            self.relay_peer(peer, &peers).await;
+            self.relay_peer(peer, &peers).await?;
         }
+        Ok(())
     }
-    pub async fn update(&mut self) {
+    pub async fn update(&mut self) -> Result<(), io::Error> {
         while let Ok((connection, reciever)) = self.new_peers.try_recv() {
             let peer = PeerId::from(connection.remote_id());
-            self.relay_peer(peer, &[]).await;
+            self.relay_peer(peer, &[]).await?;
             self.connections.insert(peer, (connection, reciever));
         }
-        self.relay_peers().await;
+        self.relay_peers().await?;
+        Ok(())
     }
-    pub async fn broadcast(&mut self, msg: T) {
+    pub async fn broadcast(&mut self, msg: T) -> Result<(), io::Error> {
         let bytes = self.buffer.encode(&msg);
         let len = u32::try_from(bytes.len()).unwrap();
         for (_, send) in self.connections.values_mut() {
-            send.write_u8(MESSAGE_MAIN).await.unwrap();
-            send.write_u32(len).await.unwrap();
-            send.write_all(bytes).await.unwrap();
+            send.write_u8(MESSAGE_MAIN).await?;
+            send.write_u32(len).await?;
+            send.write_all(bytes).await?;
         }
+        Ok(())
     }
-    pub async fn send(&mut self, peer: PeerId, msg: T) {
+    pub async fn send(&mut self, peer: PeerId, msg: T) -> Result<(), io::Error> {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(&msg);
             let len = u32::try_from(bytes.len()).unwrap();
-            send.write_u8(MESSAGE_MAIN).await.unwrap();
-            send.write_u32(len).await.unwrap();
-            send.write_all(bytes).await.unwrap();
+            send.write_u8(MESSAGE_MAIN).await?;
+            send.write_u32(len).await?;
+            send.write_all(bytes).await?;
         }
+        Ok(())
     }
 }
 struct Protocol<T: P2PMessage> {
@@ -201,7 +211,7 @@ struct Protocol<T: P2PMessage> {
 }
 impl<T: P2PMessage> Debug for Protocol<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "")
+        write!(f, "Protocol")
     }
 }
 impl<T: P2PMessage> Protocol<T> {
@@ -280,7 +290,9 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     mut iroh: If<ResMut<IrohResource<T>>>,
     tokio: Res<TokioTasksRuntime>,
 ) {
-    tokio.runtime().block_on(async { iroh.update().await });
+    if let Err(e) = tokio.runtime().block_on(iroh.update()) {
+        println!("{e:?}")
+    }
     while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
     }

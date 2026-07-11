@@ -4,25 +4,24 @@ use bevy_ecs::message::Message;
 use bevy_ecs::system::{Res, ResMut, SystemParam};
 use bevy_tokio_tasks::TokioTasksRuntime;
 use bitcode::{DecodeOwned, Encode};
+use std::io;
 #[derive(SystemParam)]
 pub struct Net<'w, T: P2PMessage> {
     pub iroh: Option<ResMut<'w, IrohResource<T>>>,
     pub tokio: Res<'w, TokioTasksRuntime>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer: PeerId, message: T) {
+    pub fn send(&mut self, peer: PeerId, message: T) -> Result<(), io::Error> {
         if let Some(iroh) = &mut self.iroh {
-            self.tokio.runtime().block_on(async {
-                iroh.send(peer, message).await;
-            });
+            self.tokio.runtime().block_on(iroh.send(peer, message))?;
         }
+        Ok(())
     }
-    pub fn broadcast(&mut self, message: T) {
+    pub fn broadcast(&mut self, message: T) -> Result<(), io::Error> {
         if let Some(iroh) = &mut self.iroh {
-            self.tokio.runtime().block_on(async {
-                iroh.broadcast(message).await;
-            });
+            self.tokio.runtime().block_on(iroh.broadcast(message))?;
         }
+        Ok(())
     }
 }
 #[derive(Message)]

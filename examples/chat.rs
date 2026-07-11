@@ -3,7 +3,7 @@ use bevy::app::{App, FixedUpdate};
 use bevy_app::Startup;
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::resource::Resource;
-use bevy_ecs::system::Res;
+use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{MessageReceived, Net};
@@ -12,7 +12,8 @@ use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
 use iroh::EndpointId;
 use std::env::args;
-use std::io::{BufRead, stdin};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write, stdin};
 use std::str::FromStr;
 use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, mpsc};
@@ -43,19 +44,34 @@ fn main() {
     app.add_systems(FixedUpdate, (update, receive_message));
     app.run();
 }
-fn startup(iroh: Res<IrohResource<Msg>>) {
-    println!("{}", iroh.router.endpoint().id());
+fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
+    let mut file = OpenOptions::new()
+        .append(true)
+        .write(true)
+        .read(true)
+        .create(true)
+        .truncate(false)
+        .open("chats")
+        .unwrap();
+    for line in BufReader::new(&file).lines().flatten() {
+        if let Ok(endpoint) = EndpointId::from_str(&line) {
+            let peer = PeerId::from(endpoint);
+            commands.trigger(IrohConnect::new(peer));
+        }
+    }
+    file.write_fmt(format_args!("{}\n", iroh.router.endpoint().id()))
+        .unwrap();
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(Msg::Chat(line))
+        net.broadcast(Msg::Chat(line)).unwrap()
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {
     for msg in reader.read() {
         match &msg.message {
             Msg::Chat(str) => {
-                println!("{:?}: {str}", msg.peer);
+                println!("{}: {str}", msg.peer.iroh().fmt_short());
             }
         }
     }
