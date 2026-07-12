@@ -1,5 +1,5 @@
 use crate::id::PeerId;
-use crate::message::{MessageReceived, P2PMessage, PeerJoined};
+use crate::message::{MessageReceived, P2PMessage, PeerConnected};
 use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
@@ -188,23 +188,39 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         Ok(())
     }
-    pub async fn broadcast(&mut self, msg: &T) -> Result<(), io::Error> {
+    pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(PeerId)) {
         let bytes = self.buffer.encode(msg);
         let len = u32::try_from(bytes.len()).unwrap();
-        for (_, send) in self.connections.values_mut() {
-            send.write_all(len.as_bytes()).await?;
-            send.write_all(bytes).await?;
+        let mut disconnections = Vec::with_capacity(4);
+        for (peer, (_, send)) in &mut self.connections {
+            if try {
+                send.write_all(len.as_bytes()).await?;
+                send.write_all(bytes).await?;
+            }
+            .is_err()
+            {
+                disconnections.push(*peer);
+            }
         }
-        Ok(())
+        for peer in disconnections {
+            self.connections.remove(&peer);
+            f(peer);
+        }
     }
-    pub async fn send(&mut self, peer: PeerId, msg: &T) -> Result<(), io::Error> {
+    pub async fn send(&mut self, peer: PeerId, msg: &T, f: impl FnOnce(PeerId)) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
             let len = u32::try_from(bytes.len()).unwrap();
-            send.write_all(len.as_bytes()).await?;
-            send.write_all(bytes).await?;
+            if try {
+                send.write_all(len.as_bytes()).await?;
+                send.write_all(bytes).await?;
+            }
+            .is_err()
+            {
+                self.connections.remove(&peer);
+                f(peer);
+            }
         }
-        Ok(())
     }
 }
 struct Protocol<T: P2PMessage> {
@@ -284,12 +300,12 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
 }
 pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
-    mut peer_writer: MessageWriter<PeerJoined>,
+    mut peer_writer: MessageWriter<PeerConnected>,
     mut iroh: If<ResMut<IrohResource<T>>>,
     tokio: Res<TokioTasksRuntime>,
 ) {
     if let Err(e) = tokio.runtime().block_on(iroh.update(|peer| {
-        peer_writer.write(PeerJoined::from(peer));
+        peer_writer.write(PeerConnected::from(peer));
     })) {
         println!("{e:?}");
     }

@@ -1,12 +1,12 @@
 use bevy::MinimalPlugins;
 use bevy::app::{App, FixedUpdate};
-use bevy_app::Startup;
+use bevy_app::{FixedPostUpdate, Startup};
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
-use bevy_p2p::message::{MessageReceived, Net, PeerJoined};
+use bevy_p2p::message::{MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
 use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
@@ -35,12 +35,18 @@ fn main() {
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
-    app.add_systems(FixedUpdate, (update, on_join, receive_message));
+    app.add_systems(FixedUpdate, (update, on_connect, receive_message));
+    app.add_systems(FixedPostUpdate, on_disconnect);
     app.run();
 }
-fn on_join(mut reader: PopulatedMessageReader<PeerJoined>) {
+fn on_connect(mut reader: PopulatedMessageReader<PeerConnected>) {
     for peer in reader.read() {
-        println!("{} joined", peer.peer.iroh().fmt_short());
+        println!("{} connect", peer.peer.iroh().fmt_short());
+    }
+}
+fn on_disconnect(mut reader: PopulatedMessageReader<PeerDisconnected>) {
+    for peer in reader.read() {
+        println!("{} disconnect", peer.peer.iroh().fmt_short());
     }
 }
 fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
@@ -64,7 +70,7 @@ fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(&Msg::Chat(line)).unwrap()
+        net.broadcast(&Msg::Chat(line));
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {
