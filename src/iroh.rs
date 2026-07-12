@@ -133,10 +133,15 @@ impl<T: P2PMessage> IrohResource<T> {
             messages_send: Arc<Sender<(PeerId, K)>>,
             peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
         ) {
-            if let Ok(connection) = endpoint.connect(peer.iroh(), ALPN).await {
-                let (send, recv) = connection.open_bi().await.unwrap();
-                tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
-                sender.send((connection, send, true)).await.unwrap();
+            match endpoint.connect(peer.iroh(), ALPN).await {
+                Ok(connection) => {
+                    let (send, recv) = connection.open_bi().await.unwrap();
+                    tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
+                    sender.send((connection, send, true)).await.unwrap();
+                }
+                Err(e) => {
+                    println!("{e:?}");
+                }
             }
         }
         if self.connections.contains_key(&peer) || self.pending.contains(&peer) {
@@ -176,7 +181,9 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         while let Ok(peers) = self.peer_relay.try_recv() {
             for peer in peers {
-                self.connect(peer)?;
+                if peer != self.my_id {
+                    self.connect(peer)?;
+                }
             }
         }
         Ok(())
@@ -233,37 +240,34 @@ async fn receive<T: P2PMessage>(
     mut recv: RecvStream,
     send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Arc<Sender<Box<[PeerId]>>>,
-) {
-    if let Err(e) = try {
-        let size = read_u32(&mut recv).await?;
-        if size != 0 {
-            let len = size as usize;
-            let mut peers_buf = vec![0; len * size_of::<PeerId>()];
-            recv.read_exact(&mut peers_buf).await?;
-            let (ptr, len, cap) = peers_buf.into_raw_parts();
-            let peers = unsafe {
-                Vec::from_raw_parts(
-                    ptr.cast::<PeerId>(),
-                    len / size_of::<PeerId>(),
-                    cap / size_of::<PeerId>(),
-                )
-            };
-            peer_relay.send(peers.into_boxed_slice()).await.unwrap();
-        }
-        let mut buffer = Buffer::new();
-        let mut recv_buffer = Vec::new();
-        while let Ok(size) = read_u32(&mut recv).await {
-            let len = size as usize;
-            if len > recv_buffer.len() {
-                recv_buffer.resize(len, 0);
-            }
-            recv.read_exact(&mut recv_buffer[..len]).await?;
-            let val = buffer.decode(&recv_buffer[..len]).unwrap();
-            send.send((peer, val)).await.unwrap();
-        }
-    } {
-        _ = e;
+) -> Result<(), ReadExactError> {
+    let size = read_u32(&mut recv).await?;
+    if size != 0 {
+        let len = size as usize;
+        let mut peers_buf = vec![0; len * size_of::<PeerId>()];
+        recv.read_exact(&mut peers_buf).await?;
+        let (ptr, len, cap) = peers_buf.into_raw_parts();
+        let peers = unsafe {
+            Vec::from_raw_parts(
+                ptr.cast::<PeerId>(),
+                len / size_of::<PeerId>(),
+                cap / size_of::<PeerId>(),
+            )
+        };
+        peer_relay.send(peers.into_boxed_slice()).await.unwrap();
     }
+    let mut buffer = Buffer::new();
+    let mut recv_buffer = Vec::new();
+    while let Ok(size) = read_u32(&mut recv).await {
+        let len = size as usize;
+        if len > recv_buffer.len() {
+            recv_buffer.resize(len, 0);
+        }
+        recv.read_exact(&mut recv_buffer[..len]).await?;
+        let val = buffer.decode(&recv_buffer[..len]).unwrap();
+        send.send((peer, val)).await.unwrap();
+    }
+    Ok(())
 }
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
