@@ -53,16 +53,12 @@ pub(crate) fn on_connect<T: P2PMessage>(
     iroh_opt: Option<ResMut<IrohResource<T>>>,
 ) {
     tokio.runtime().block_on(async {
-        if let Err(e) = try {
-            if let Some(mut iroh) = iroh_opt {
-                iroh.connect(event.peer)?;
-            } else {
-                let mut iroh = IrohResource::<T>::bind().await.unwrap();
-                iroh.connect(event.peer)?;
-                commands.insert_resource(iroh);
-            }
-        } {
-            println!("{e:?}");
+        if let Some(mut iroh) = iroh_opt {
+            iroh.connect(event.peer);
+        } else {
+            let mut iroh = IrohResource::<T>::bind().await.unwrap();
+            iroh.connect(event.peer);
+            commands.insert_resource(iroh);
         }
     });
 }
@@ -131,7 +127,7 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_connect_failed_send,
         })
     }
-    pub fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
+    pub fn connect(&mut self, peer: PeerId) {
         async fn connect<K: P2PMessage>(
             peer: PeerId,
             endpoint: Endpoint,
@@ -152,7 +148,7 @@ impl<T: P2PMessage> IrohResource<T> {
             }
         }
         if self.connections.contains_key(&peer) || self.pending.contains(&peer) {
-            return Ok(());
+            return;
         }
         self.pending.insert(peer);
         tokio::spawn(connect(
@@ -163,7 +159,6 @@ impl<T: P2PMessage> IrohResource<T> {
             self.peer_relay_send.clone(),
             self.peer_connect_failed_send.clone(),
         ));
-        Ok(())
     }
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
         let len = u32::try_from(self.connections.len()).unwrap();
@@ -173,7 +168,7 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         Ok(())
     }
-    pub async fn update(&mut self, mut f: impl FnMut(PeerId)) -> Result<(), io::Error> {
+    pub async fn update(&mut self, mut f: impl FnMut(PeerId)) {
         while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
             let peer = PeerId::from(connection.remote_id());
             if self.connections.contains_key(&peer) {
@@ -183,18 +178,18 @@ impl<T: P2PMessage> IrohResource<T> {
             } else {
                 f(peer);
             }
-            self.relay_peer(&mut send).await?;
-            self.connections.insert(peer, (connection, send));
+            if self.relay_peer(&mut send).await.is_ok() {
+                self.connections.insert(peer, (connection, send));
+            }
             self.pending.remove(&peer);
         }
         while let Ok(peers) = self.peer_relay.try_recv() {
             for peer in peers {
                 if peer != self.my_id {
-                    self.connect(peer)?;
+                    self.connect(peer);
                 }
             }
         }
-        Ok(())
     }
     pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(PeerId)) {
         let bytes = self.buffer.encode(msg);
@@ -313,11 +308,9 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     mut iroh: If<ResMut<IrohResource<T>>>,
     tokio: Res<TokioTasksRuntime>,
 ) {
-    if let Err(e) = tokio.runtime().block_on(iroh.update(|peer| {
+    tokio.runtime().block_on(iroh.update(|peer| {
         peer_writer.write(PeerConnected::from(peer));
-    })) {
-        println!("{e:?}");
-    }
+    }));
     while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
     }
