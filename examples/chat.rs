@@ -8,7 +8,6 @@ use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
-use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
 use iroh::EndpointId;
 use std::fs::OpenOptions;
@@ -31,7 +30,6 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_plugins(P2PPlugin::<Msg>::new());
-    app.add_plugins(TokioTasksPlugin::default());
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
