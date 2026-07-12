@@ -1,5 +1,5 @@
 use crate::id::PeerId;
-use crate::message::{MessageReceived, P2PMessage, PeerConnected};
+use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected};
 use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
@@ -33,6 +33,8 @@ pub struct IrohResource<T: P2PMessage> {
     messages_send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Receiver<Box<[PeerId]>>,
     peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
+    peer_connect_failed: Receiver<PeerId>,
+    peer_connect_failed_send: Arc<Sender<PeerId>>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -95,9 +97,11 @@ impl<T: P2PMessage> IrohResource<T> {
         let (new_tx, new_peers) = mpsc::channel(8);
         let (message_tx, messages) = mpsc::channel(4096);
         let (peer_tx, peer_relay) = mpsc::channel(8);
+        let (peer_connect_failed_tx, peer_connect_failed) = mpsc::channel(8);
         let messages_send = Arc::new(message_tx);
         let new_peers_send = Arc::new(new_tx);
         let peer_relay_send = Arc::new(peer_tx);
+        let peer_connect_failed_send = Arc::new(peer_connect_failed_tx);
         let router = Router::builder(endpoint)
             .accept(
                 ALPN,
@@ -123,6 +127,8 @@ impl<T: P2PMessage> IrohResource<T> {
             messages_send,
             peer_relay,
             peer_relay_send,
+            peer_connect_failed,
+            peer_connect_failed_send,
         })
     }
     pub fn connect(&mut self, peer: PeerId) -> Result<(), io::Error> {
@@ -132,6 +138,7 @@ impl<T: P2PMessage> IrohResource<T> {
             sender: Arc<Sender<(Connection, SendStream, bool)>>,
             messages_send: Arc<Sender<(PeerId, K)>>,
             peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
+            peer_connect_failed: Arc<Sender<PeerId>>,
         ) {
             match endpoint.connect(peer.iroh(), ALPN).await {
                 Ok(connection) => {
@@ -139,8 +146,8 @@ impl<T: P2PMessage> IrohResource<T> {
                     tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
                     sender.send((connection, send, true)).await.unwrap();
                 }
-                Err(e) => {
-                    println!("{e:?}");
+                Err(_) => {
+                    peer_connect_failed.send(peer).await.unwrap();
                 }
             }
         }
@@ -154,6 +161,7 @@ impl<T: P2PMessage> IrohResource<T> {
             self.new_peers_send.clone(),
             self.messages_send.clone(),
             self.peer_relay_send.clone(),
+            self.peer_connect_failed_send.clone(),
         ));
         Ok(())
     }
@@ -301,6 +309,7 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
 pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
     mut peer_writer: MessageWriter<PeerConnected>,
+    mut peer_failed_writer: MessageWriter<ConnectFailed>,
     mut iroh: If<ResMut<IrohResource<T>>>,
     tokio: Res<TokioTasksRuntime>,
 ) {
@@ -311,5 +320,8 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     }
     while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
+    }
+    while let Ok(peer) = iroh.peer_connect_failed.try_recv() {
+        peer_failed_writer.write(ConnectFailed::from(peer));
     }
 }

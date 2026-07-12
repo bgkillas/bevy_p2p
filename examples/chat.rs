@@ -6,7 +6,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
-use bevy_p2p::message::{MessageReceived, Net, PeerConnected, PeerDisconnected};
+use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
 use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
@@ -35,9 +35,17 @@ fn main() {
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
-    app.add_systems(FixedUpdate, (update, on_connect, receive_message));
+    app.add_systems(
+        FixedUpdate,
+        (update, connect_failed, on_connect, receive_message),
+    );
     app.add_systems(FixedPostUpdate, on_disconnect);
     app.run();
+}
+fn connect_failed(mut reader: PopulatedMessageReader<ConnectFailed>) {
+    for peer in reader.read() {
+        println!("{} failed", peer.peer.iroh().fmt_short());
+    }
 }
 fn on_connect(mut reader: PopulatedMessageReader<PeerConnected>) {
     for peer in reader.read() {

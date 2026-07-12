@@ -1,4 +1,4 @@
-use crate::message::{MessageReceived, P2PMessage, PeerConnected, PeerDisconnected};
+use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected, PeerDisconnected};
 use bevy_app::{App, FixedPreUpdate, Plugin};
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
@@ -30,6 +30,7 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
             }
             Err(err) => bevy_log::warn!("{err}"),
         }
+        app.add_message::<ConnectFailed>();
         app.add_message::<PeerConnected>();
         app.add_message::<PeerDisconnected>();
         app.add_message::<MessageReceived<T>>();

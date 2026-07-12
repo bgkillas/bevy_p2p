@@ -30,6 +30,15 @@ impl<T: P2PMessage> Net<'_, T> {
     }
 }
 #[derive(Message)]
+pub struct ConnectFailed {
+    pub peer: PeerId,
+}
+impl From<PeerId> for ConnectFailed {
+    fn from(peer: PeerId) -> Self {
+        Self { peer }
+    }
+}
+#[derive(Message)]
 pub struct PeerConnected {
     pub peer: PeerId,
 }
