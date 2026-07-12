@@ -1,5 +1,5 @@
 use crate::id::PeerId;
-use crate::message::{MessageReceived, P2PMessage};
+use crate::message::{MessageReceived, P2PMessage, PeerJoined};
 use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
@@ -27,8 +27,8 @@ pub struct IrohResource<T: P2PMessage> {
     pub pending: FxHashSet<PeerId>,
     pub my_id: PeerId,
     buffer: Buffer,
-    new_peers: Receiver<(Connection, SendStream)>,
-    new_peers_send: Arc<Sender<(Connection, SendStream)>>,
+    new_peers: Receiver<(Connection, SendStream, bool)>,
+    new_peers_send: Arc<Sender<(Connection, SendStream, bool)>>,
     messages: Receiver<(PeerId, T)>,
     messages_send: Arc<Sender<(PeerId, T)>>,
     peer_relay: Receiver<Box<[PeerId]>>,
@@ -129,14 +129,14 @@ impl<T: P2PMessage> IrohResource<T> {
         async fn connect<K: P2PMessage>(
             peer: PeerId,
             endpoint: Endpoint,
-            sender: Arc<Sender<(Connection, SendStream)>>,
+            sender: Arc<Sender<(Connection, SendStream, bool)>>,
             messages_send: Arc<Sender<(PeerId, K)>>,
             peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
         ) {
             if let Ok(connection) = endpoint.connect(peer.iroh(), ALPN).await {
                 let (send, recv) = connection.open_bi().await.unwrap();
                 tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
-                sender.send((connection, send)).await.unwrap();
+                sender.send((connection, send, true)).await.unwrap();
             }
         }
         if self.connections.contains_key(&peer) || self.pending.contains(&peer) {
@@ -160,9 +160,16 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         Ok(())
     }
-    pub async fn update(&mut self) -> Result<(), io::Error> {
-        while let Ok((connection, mut send)) = self.new_peers.try_recv() {
+    pub async fn update(&mut self, mut f: impl FnMut(PeerId)) -> Result<(), io::Error> {
+        while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
             let peer = PeerId::from(connection.remote_id());
+            if self.connections.contains_key(&peer) {
+                if (self.my_id.iroh() < peer.iroh()) ^ owner {
+                    continue;
+                }
+            } else {
+                f(peer);
+            }
             self.relay_peer(&mut send).await?;
             self.connections.insert(peer, (connection, send));
             self.pending.remove(&peer);
@@ -194,7 +201,7 @@ impl<T: P2PMessage> IrohResource<T> {
     }
 }
 struct Protocol<T: P2PMessage> {
-    pub sender: Arc<Sender<(Connection, SendStream)>>,
+    pub sender: Arc<Sender<(Connection, SendStream, bool)>>,
     pub messages: Arc<Sender<(PeerId, T)>>,
     pub peer_relay: Arc<Sender<Box<[PeerId]>>>,
 }
@@ -205,7 +212,7 @@ impl<T: P2PMessage> Debug for Protocol<T> {
 }
 impl<T: P2PMessage> Protocol<T> {
     fn new(
-        sender: Arc<Sender<(Connection, SendStream)>>,
+        sender: Arc<Sender<(Connection, SendStream, bool)>>,
         messages: Arc<Sender<(PeerId, T)>>,
         peer_relay: Arc<Sender<Box<[PeerId]>>>,
     ) -> Self {
@@ -255,7 +262,7 @@ async fn receive<T: P2PMessage>(
             send.send((peer, val)).await.unwrap();
         }
     } {
-        panic!("{e:?}");
+        _ = e;
     }
 }
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
@@ -267,16 +274,19 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
             self.messages.clone(),
             self.peer_relay.clone(),
         ));
-        self.sender.send((connection, send)).await.unwrap();
+        self.sender.send((connection, send, false)).await.unwrap();
         Ok(())
     }
 }
 pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
+    mut peer_writer: MessageWriter<PeerJoined>,
     mut iroh: If<ResMut<IrohResource<T>>>,
     tokio: Res<TokioTasksRuntime>,
 ) {
-    if let Err(e) = tokio.runtime().block_on(iroh.update()) {
+    if let Err(e) = tokio.runtime().block_on(iroh.update(|peer| {
+        peer_writer.write(PeerJoined::from(peer));
+    })) {
         println!("{e:?}");
     }
     while let Ok((peer, message)) = iroh.messages.try_recv() {

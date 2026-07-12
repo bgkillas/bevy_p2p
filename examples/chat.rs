@@ -6,7 +6,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
-use bevy_p2p::message::{MessageReceived, Net};
+use bevy_p2p::message::{MessageReceived, Net, PeerJoined};
 use bevy_p2p::plugin::P2PPlugin;
 use bevy_tokio_tasks::TokioTasksPlugin;
 use bitcode::{Decode, Encode};
@@ -35,8 +35,13 @@ fn main() {
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(Startup, startup);
-    app.add_systems(FixedUpdate, (update, receive_message));
+    app.add_systems(FixedUpdate, (update, on_join, receive_message));
     app.run();
+}
+fn on_join(mut reader: PopulatedMessageReader<PeerJoined>) {
+    for peer in reader.read() {
+        println!("{} joined", peer.peer.iroh().fmt_short());
+    }
 }
 fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
     let mut file = OpenOptions::new()
@@ -55,6 +60,7 @@ fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
     }
     file.write_fmt(format_args!("{}\n", iroh.router.endpoint().id()))
         .unwrap();
+    println!("{}", iroh.router.endpoint().id().fmt_short());
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {

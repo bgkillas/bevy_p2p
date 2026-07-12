@@ -26,6 +26,15 @@ impl<T: P2PMessage> Net<'_, T> {
     }
 }
 #[derive(Message)]
+pub struct PeerJoined {
+    pub peer: PeerId,
+}
+impl From<PeerId> for PeerJoined {
+    fn from(peer: PeerId) -> Self {
+        Self { peer }
+    }
+}
+#[derive(Message)]
 pub struct MessageReceived<T: P2PMessage> {
     pub peer: PeerId,
     pub message: T,
