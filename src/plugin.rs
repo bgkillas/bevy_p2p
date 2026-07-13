@@ -36,9 +36,9 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
         app.add_message::<PeerDisconnected>();
         app.add_message::<MessageReceived<T>>();
         app.add_plugins(TokioTasksPlugin::default());
-        app.add_systems(FixedPreUpdate, crate::iroh::receive_messages::<T>);
-        app.add_observer(crate::iroh::on_bind::<T>);
-        app.add_observer(crate::iroh::on_unbind::<T>);
-        app.add_observer(crate::iroh::on_connect::<T>);
+        app.add_systems(FixedPreUpdate, crate::iroh_res::receive_messages::<T>);
+        app.add_observer(crate::iroh_res::on_bind::<T>);
+        app.add_observer(crate::iroh_res::on_unbind::<T>);
+        app.add_observer(crate::iroh_res::on_connect::<T>);
     }
 }

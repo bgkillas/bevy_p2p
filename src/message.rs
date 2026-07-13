@@ -1,5 +1,5 @@
 #![allow(clippy::shadow_reuse)]
-use crate::iroh::IrohResource;
+use crate::iroh_res::IrohResource;
 use bevy_ecs::message::{Message, MessageWriter};
 use bevy_ecs::system::{Res, ResMut, SystemParam};
 use bevy_tokio_tasks::TokioTasksRuntime;
