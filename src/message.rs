@@ -1,10 +1,10 @@
 #![allow(clippy::shadow_reuse)]
-use crate::id::PeerId;
 use crate::iroh::IrohResource;
 use bevy_ecs::message::{Message, MessageWriter};
 use bevy_ecs::system::{Res, ResMut, SystemParam};
 use bevy_tokio_tasks::TokioTasksRuntime;
 use bitcode::{DecodeOwned, Encode};
+use iroh::EndpointId;
 #[derive(SystemParam)]
 pub struct Net<'w, T: P2PMessage> {
     pub iroh: Option<ResMut<'w, IrohResource<T>>>,
@@ -12,7 +12,7 @@ pub struct Net<'w, T: P2PMessage> {
     pub disconnect: MessageWriter<'w, PeerDisconnected>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer: PeerId, message: &T) {
+    pub fn send(&mut self, peer: EndpointId, message: &T) {
         if let Some(ir) = &mut self.iroh {
             self.tokio
                 .runtime()
@@ -31,34 +31,34 @@ impl<T: P2PMessage> Net<'_, T> {
 }
 #[derive(Message)]
 pub struct ConnectFailed {
-    pub peer: PeerId,
+    pub peer: EndpointId,
 }
-impl From<PeerId> for ConnectFailed {
-    fn from(peer: PeerId) -> Self {
+impl From<EndpointId> for ConnectFailed {
+    fn from(peer: EndpointId) -> Self {
         Self { peer }
     }
 }
 #[derive(Message)]
 pub struct PeerConnected {
-    pub peer: PeerId,
+    pub peer: EndpointId,
 }
-impl From<PeerId> for PeerConnected {
-    fn from(peer: PeerId) -> Self {
+impl From<EndpointId> for PeerConnected {
+    fn from(peer: EndpointId) -> Self {
         Self { peer }
     }
 }
 #[derive(Message)]
 pub struct PeerDisconnected {
-    pub peer: PeerId,
+    pub peer: EndpointId,
 }
-impl From<PeerId> for PeerDisconnected {
-    fn from(peer: PeerId) -> Self {
+impl From<EndpointId> for PeerDisconnected {
+    fn from(peer: EndpointId) -> Self {
         Self { peer }
     }
 }
 #[derive(Message)]
 pub struct MessageReceived<T: P2PMessage> {
-    pub peer: PeerId,
+    pub peer: EndpointId,
     pub message: T,
 }
 pub trait P2PMessage: Send + Sync + Encode + DecodeOwned + 'static {}

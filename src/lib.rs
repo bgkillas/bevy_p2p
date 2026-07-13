@@ -1,5 +1,3 @@
-pub mod id;
-#[cfg(not(feature = "steam"))]
 pub mod iroh;
 pub mod message;
 pub mod plugin;

@@ -1,19 +1,18 @@
-use crate::id::PeerId;
 use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected};
-use bevy::prelude::Resource;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
 use bevy_ecs::observer::On;
+use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, If, Res, ResMut};
 use bevy_ecs::world::World;
 use bevy_tokio_tasks::tokio::sync::mpsc;
 use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
 use bevy_tokio_tasks::{TokioTasksRuntime, tokio};
 use bitcode::Buffer;
-use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointId};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
@@ -23,26 +22,26 @@ const ALPN: &[u8] = b"bevy_p2p";
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub router: Router,
-    pub connections: FxHashMap<PeerId, (Connection, SendStream)>,
-    pub pending: FxHashSet<PeerId>,
-    pub my_id: PeerId,
+    pub connections: FxHashMap<EndpointId, (Connection, SendStream)>,
+    pub pending: FxHashSet<EndpointId>,
+    pub my_id: EndpointId,
     buffer: Buffer,
     new_peers: Receiver<(Connection, SendStream, bool)>,
     new_peers_send: Arc<Sender<(Connection, SendStream, bool)>>,
-    messages: Receiver<(PeerId, T)>,
-    messages_send: Arc<Sender<(PeerId, T)>>,
-    peer_relay: Receiver<Box<[PeerId]>>,
-    peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
-    peer_connect_failed: Receiver<PeerId>,
-    peer_connect_failed_send: Arc<Sender<PeerId>>,
+    messages: Receiver<(EndpointId, T)>,
+    messages_send: Arc<Sender<(EndpointId, T)>>,
+    peer_relay: Receiver<Box<[EndpointId]>>,
+    peer_relay_send: Arc<Sender<Box<[EndpointId]>>>,
+    peer_connect_failed: Receiver<EndpointId>,
+    peer_connect_failed_send: Arc<Sender<EndpointId>>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
-    pub peer: PeerId,
+    pub peer: EndpointId,
 }
 impl IrohConnect {
     #[must_use]
-    pub fn new(peer: PeerId) -> Self {
+    pub fn new(peer: EndpointId) -> Self {
         Self { peer }
     }
 }
@@ -89,7 +88,7 @@ pub(crate) fn on_unbind<T: P2PMessage>(
 impl<T: P2PMessage> IrohResource<T> {
     pub async fn bind() -> Result<Self, BindError> {
         let endpoint = Endpoint::bind(N0).await?;
-        let my_id = PeerId::from(endpoint.id());
+        let my_id = EndpointId::from(endpoint.id());
         let (new_tx, new_peers) = mpsc::channel(8);
         let (message_tx, messages) = mpsc::channel(4096);
         let (peer_tx, peer_relay) = mpsc::channel(8);
@@ -127,16 +126,16 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_connect_failed_send,
         })
     }
-    pub fn connect(&mut self, peer: PeerId) {
+    pub fn connect(&mut self, peer: EndpointId) {
         async fn connect<K: P2PMessage>(
-            peer: PeerId,
+            peer: EndpointId,
             endpoint: Endpoint,
             sender: Arc<Sender<(Connection, SendStream, bool)>>,
-            messages_send: Arc<Sender<(PeerId, K)>>,
-            peer_relay_send: Arc<Sender<Box<[PeerId]>>>,
-            peer_connect_failed: Arc<Sender<PeerId>>,
+            messages_send: Arc<Sender<(EndpointId, K)>>,
+            peer_relay_send: Arc<Sender<Box<[EndpointId]>>>,
+            peer_connect_failed: Arc<Sender<EndpointId>>,
         ) {
-            match endpoint.connect(peer.iroh(), ALPN).await {
+            match endpoint.connect(peer, ALPN).await {
                 Ok(connection) => {
                     let (send, recv) = connection.open_bi().await.unwrap();
                     tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
@@ -163,16 +162,16 @@ impl<T: P2PMessage> IrohResource<T> {
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), io::Error> {
         let len = u32::try_from(self.connections.len()).unwrap();
         send.write_all(len.as_bytes()).await?;
-        for peer in self.connections.keys().copied() {
-            send.write_all(peer.iroh().as_bytes()).await?;
+        for peer in self.connections.keys() {
+            send.write_all(peer.as_bytes()).await?;
         }
         Ok(())
     }
-    pub async fn update(&mut self, mut f: impl FnMut(PeerId)) {
+    pub async fn update(&mut self, mut f: impl FnMut(EndpointId)) {
         while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
-            let peer = PeerId::from(connection.remote_id());
+            let peer = EndpointId::from(connection.remote_id());
             if self.connections.contains_key(&peer) {
-                if (self.my_id.iroh() < peer.iroh()) ^ owner {
+                if (self.my_id < peer) ^ owner {
                     continue;
                 }
             } else {
@@ -191,7 +190,7 @@ impl<T: P2PMessage> IrohResource<T> {
             }
         }
     }
-    pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(PeerId)) {
+    pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(EndpointId)) {
         let bytes = self.buffer.encode(msg);
         let mut disconnections = Vec::with_capacity(4);
         for (peer, (_, send)) in &mut self.connections {
@@ -204,7 +203,7 @@ impl<T: P2PMessage> IrohResource<T> {
             f(peer);
         }
     }
-    pub async fn send(&mut self, peer: PeerId, msg: &T, f: impl FnOnce(PeerId)) {
+    pub async fn send(&mut self, peer: EndpointId, msg: &T, f: impl FnOnce(EndpointId)) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
             if send_bytes(send, bytes).await.is_err() {
@@ -221,8 +220,8 @@ async fn send_bytes(send: &mut SendStream, bytes: &[u8]) -> Result<(), WriteErro
 }
 struct Protocol<T: P2PMessage> {
     pub sender: Arc<Sender<(Connection, SendStream, bool)>>,
-    pub messages: Arc<Sender<(PeerId, T)>>,
-    pub peer_relay: Arc<Sender<Box<[PeerId]>>>,
+    pub messages: Arc<Sender<(EndpointId, T)>>,
+    pub peer_relay: Arc<Sender<Box<[EndpointId]>>>,
 }
 impl<T: P2PMessage> Debug for Protocol<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -232,8 +231,8 @@ impl<T: P2PMessage> Debug for Protocol<T> {
 impl<T: P2PMessage> Protocol<T> {
     fn new(
         sender: Arc<Sender<(Connection, SendStream, bool)>>,
-        messages: Arc<Sender<(PeerId, T)>>,
-        peer_relay: Arc<Sender<Box<[PeerId]>>>,
+        messages: Arc<Sender<(EndpointId, T)>>,
+        peer_relay: Arc<Sender<Box<[EndpointId]>>>,
     ) -> Self {
         Self {
             sender,
@@ -248,22 +247,22 @@ async fn read_u32(recv: &mut RecvStream) -> Result<u32, ReadExactError> {
     Ok(val)
 }
 async fn receive<T: P2PMessage>(
-    peer: PeerId,
+    peer: EndpointId,
     mut recv: RecvStream,
-    send: Arc<Sender<(PeerId, T)>>,
-    peer_relay: Arc<Sender<Box<[PeerId]>>>,
+    send: Arc<Sender<(EndpointId, T)>>,
+    peer_relay: Arc<Sender<Box<[EndpointId]>>>,
 ) -> Result<(), ReadExactError> {
     let size = read_u32(&mut recv).await?;
     if size != 0 {
         let len = size as usize;
-        let mut peers_buf = vec![0; len * size_of::<PeerId>()];
+        let mut peers_buf = vec![0; len * size_of::<EndpointId>()];
         recv.read_exact(&mut peers_buf).await?;
         let (ptr, len, cap) = peers_buf.into_raw_parts();
         let peers = unsafe {
             Vec::from_raw_parts(
-                ptr.cast::<PeerId>(),
-                len / size_of::<PeerId>(),
-                cap / size_of::<PeerId>(),
+                ptr.cast::<EndpointId>(),
+                len / size_of::<EndpointId>(),
+                cap / size_of::<EndpointId>(),
             )
         };
         peer_relay.send(peers.into_boxed_slice()).await.unwrap();
@@ -285,7 +284,7 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (send, recv) = connection.accept_bi().await?;
         tokio::spawn(receive(
-            PeerId::from(connection.remote_id()),
+            EndpointId::from(connection.remote_id()),
             recv,
             self.messages.clone(),
             self.peer_relay.clone(),

@@ -4,7 +4,6 @@ use bevy_app::{FixedPostUpdate, Startup};
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
-use bevy_p2p::id::PeerId;
 use bevy_p2p::iroh::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
@@ -42,17 +41,17 @@ fn main() {
 }
 fn connect_failed(mut reader: PopulatedMessageReader<ConnectFailed>) {
     for peer in reader.read() {
-        println!("{} failed", peer.peer.iroh().fmt_short());
+        println!("{} failed", peer.peer.fmt_short());
     }
 }
 fn on_connect(mut reader: PopulatedMessageReader<PeerConnected>) {
     for peer in reader.read() {
-        println!("{} connect", peer.peer.iroh().fmt_short());
+        println!("{} connect", peer.peer.fmt_short());
     }
 }
 fn on_disconnect(mut reader: PopulatedMessageReader<PeerDisconnected>) {
     for peer in reader.read() {
-        println!("{} disconnect", peer.peer.iroh().fmt_short());
+        println!("{} disconnect", peer.peer.fmt_short());
     }
 }
 fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
@@ -66,7 +65,7 @@ fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
         .unwrap();
     for line in BufReader::new(&file).lines().flatten() {
         if let Ok(endpoint) = EndpointId::from_str(&line) {
-            let peer = PeerId::from(endpoint);
+            let peer = EndpointId::from(endpoint);
             commands.trigger(IrohConnect::new(peer));
         }
     }
@@ -83,7 +82,7 @@ fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {
     for msg in reader.read() {
         match &msg.message {
             Msg::Chat(str) => {
-                println!("{}: {str}", msg.peer.iroh().fmt_short());
+                println!("{}: {str}", msg.peer.fmt_short());
             }
         }
     }
