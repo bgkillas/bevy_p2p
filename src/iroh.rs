@@ -12,7 +12,7 @@ use bevy_tokio_tasks::{TokioTasksRuntime, tokio};
 use bitcode::Buffer;
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
-use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream};
+use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
@@ -193,15 +193,9 @@ impl<T: P2PMessage> IrohResource<T> {
     }
     pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(PeerId)) {
         let bytes = self.buffer.encode(msg);
-        let len = u32::try_from(bytes.len()).unwrap();
         let mut disconnections = Vec::with_capacity(4);
         for (peer, (_, send)) in &mut self.connections {
-            if try {
-                send.write_all(len.as_bytes()).await?;
-                send.write_all(bytes).await?;
-            }
-            .is_err()
-            {
+            if send_bytes(send, bytes).await.is_err() {
                 disconnections.push(*peer);
             }
         }
@@ -213,18 +207,17 @@ impl<T: P2PMessage> IrohResource<T> {
     pub async fn send(&mut self, peer: PeerId, msg: &T, f: impl FnOnce(PeerId)) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
-            let len = u32::try_from(bytes.len()).unwrap();
-            if try {
-                send.write_all(len.as_bytes()).await?;
-                send.write_all(bytes).await?;
-            }
-            .is_err()
-            {
+            if send_bytes(send, bytes).await.is_err() {
                 self.connections.remove(&peer);
                 f(peer);
             }
         }
     }
+}
+async fn send_bytes(send: &mut SendStream, bytes: &[u8]) -> Result<(), WriteError> {
+    let len = u32::try_from(bytes.len()).unwrap();
+    send.write_all(len.as_bytes()).await?;
+    send.write_all(bytes).await
 }
 struct Protocol<T: P2PMessage> {
     pub sender: Arc<Sender<(Connection, SendStream, bool)>>,
