@@ -1,9 +1,9 @@
+#![cfg_attr(target_family = "wasm", feature(oneshot_channel))]
 pub mod iroh_res;
 pub mod message;
 pub mod plugin;
+pub mod runtime;
 #[cfg(feature = "steam")]
 pub mod steam;
-pub use bevy_tokio_tasks;
-pub use bevy_tokio_tasks::tokio;
 pub use bitcode;
 pub use iroh;

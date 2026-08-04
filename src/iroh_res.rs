@@ -1,13 +1,13 @@
 use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected};
+use crate::runtime::Runtime;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
 use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
-use bevy_ecs::system::{Commands, If, Res, ResMut};
+use bevy_ecs::system::{Commands, If, Res};
 use bevy_ecs::world::World;
-use bevy_tokio_tasks::tokio::sync::mpsc;
-use bevy_tokio_tasks::tokio::sync::mpsc::{Receiver, Sender};
-use bevy_tokio_tasks::{TokioTasksRuntime, tokio};
+#[cfg(not(target_family = "wasm"))]
+use bevy_tokio_tasks::tokio;
 use bitcode::Buffer;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
@@ -16,11 +16,39 @@ use iroh::{Endpoint, EndpointId};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc};
+use tokio::sync::{Mutex, MutexGuard};
+use tokio::spawn;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver, Sender};
+#[cfg(target_family = "wasm")]
+use tokio_with_wasm as tokio;
 use zerocopy::IntoBytes as _;
 const ALPN: &[u8] = b"bevy_p2p";
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
+    pub inner: Arc<Mutex<IrohInner<T>>>,
+}
+impl<T: P2PMessage> Clone for IrohResource<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+impl<T: P2PMessage> From<IrohInner<T>> for IrohResource<T> {
+    fn from(iroh: IrohInner<T>) -> Self {
+        IrohResource {
+            inner: Arc::new(Mutex::new(iroh)),
+        }
+    }
+}
+impl<T: P2PMessage> IrohResource<T> {
+    pub async fn lock(&self) -> MutexGuard<'_, IrohInner<T>> {
+        self.inner.lock().await
+    }
+}
+pub struct IrohInner<T: P2PMessage> {
     pub router: Router,
     pub connections: FxHashMap<EndpointId, (Connection, SendStream)>,
     pub pending: FxHashSet<EndpointId>,
@@ -34,6 +62,8 @@ pub struct IrohResource<T: P2PMessage> {
     peer_relay_send: Arc<Sender<Box<[EndpointId]>>>,
     peer_connect_failed: Receiver<EndpointId>,
     peer_connect_failed_send: Arc<Sender<EndpointId>>,
+    peer_disconnects_send: std::sync::mpsc::Sender<EndpointId>,
+    peer_disconnects: std::sync::mpsc::Receiver<EndpointId>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -48,16 +78,16 @@ impl IrohConnect {
 pub(crate) fn on_connect<T: P2PMessage>(
     event: On<IrohConnect>,
     mut commands: Commands,
-    tokio: Res<TokioTasksRuntime>,
-    iroh_opt: Option<ResMut<IrohResource<T>>>,
+    mut runtime: Runtime,
+    iroh_opt: Option<Res<IrohResource<T>>>,
 ) {
-    tokio.runtime().block_on(async {
-        if let Some(mut iroh) = iroh_opt {
-            iroh.connect(event.peer);
+    runtime.spawn_return(async {
+        if let Some(iroh) = iroh_opt {
+            iroh.lock().await.connect(event.peer);
         } else {
-            let mut iroh = IrohResource::<T>::bind().await.unwrap();
+            let mut iroh = IrohInner::<T>::bind().await.unwrap();
             iroh.connect(event.peer);
-            commands.insert_resource(iroh);
+            commands.insert_resource(IrohResource::from(iroh));
         }
     });
 }
@@ -66,33 +96,35 @@ pub struct IrohBind;
 pub(crate) fn on_bind<T: P2PMessage>(
     _: On<IrohBind>,
     mut commands: Commands,
-    tokio: Res<TokioTasksRuntime>,
+    mut runtime: Runtime,
     world: &World,
 ) {
-    if !world.is_resource_added::<IrohResource<T>>() {
-        let iroh = tokio.runtime().block_on(IrohResource::<T>::bind()).unwrap();
-        commands.insert_resource(iroh);
+    if world.is_resource_added::<IrohResource<T>>() {
+        panic!()
     }
+    let iroh = runtime.spawn_return(IrohInner::<T>::bind()).unwrap();
+    commands.insert_resource(IrohResource::from(iroh));
 }
 #[derive(Event)]
 pub struct IrohUnbind;
 pub(crate) fn on_unbind<T: P2PMessage>(
     _: On<IrohUnbind>,
     mut commands: Commands,
-    tokio: Res<TokioTasksRuntime>,
-    iroh: If<ResMut<IrohResource<T>>>,
+    mut runtime: Runtime,
+    iroh: If<Res<IrohResource<T>>>,
 ) {
-    tokio.runtime().block_on(iroh.router.shutdown()).unwrap();
+    runtime.spawn_return(async {iroh.lock().await.router.shutdown().await}).unwrap();
     commands.remove_resource::<IrohResource<T>>();
 }
-impl<T: P2PMessage> IrohResource<T> {
+impl<T: P2PMessage> IrohInner<T> {
     pub async fn bind() -> Result<Self, BindError> {
         let endpoint = Endpoint::bind(N0).await?;
         let my_id = EndpointId::from(endpoint.id());
-        let (new_tx, new_peers) = mpsc::channel(8);
+        let (new_tx, new_peers) = mpsc::channel(256);
         let (message_tx, messages) = mpsc::channel(4096);
-        let (peer_tx, peer_relay) = mpsc::channel(8);
-        let (peer_connect_failed_tx, peer_connect_failed) = mpsc::channel(8);
+        let (peer_tx, peer_relay) = mpsc::channel(256);
+        let (peer_connect_failed_tx, peer_connect_failed) = mpsc::channel(256);
+        let (peer_disconnects_send, peer_disconnects) = std::sync::mpsc::channel();
         let messages_send = Arc::new(message_tx);
         let new_peers_send = Arc::new(new_tx);
         let peer_relay_send = Arc::new(peer_tx);
@@ -124,6 +156,8 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_relay_send,
             peer_connect_failed,
             peer_connect_failed_send,
+            peer_disconnects_send,
+            peer_disconnects,
         })
     }
     pub fn connect(&mut self, peer: EndpointId) {
@@ -138,7 +172,7 @@ impl<T: P2PMessage> IrohResource<T> {
             match endpoint.connect(peer, ALPN).await {
                 Ok(connection) => {
                     let (send, recv) = connection.open_bi().await.unwrap();
-                    tokio::spawn(receive(peer, recv, messages_send, peer_relay_send));
+                    spawn(receive(peer, recv, messages_send, peer_relay_send));
                     sender.send((connection, send, true)).await.unwrap();
                 }
                 Err(_) => {
@@ -150,7 +184,7 @@ impl<T: P2PMessage> IrohResource<T> {
             return;
         }
         self.pending.insert(peer);
-        tokio::spawn(connect(
+        spawn(connect(
             peer,
             self.router.endpoint().clone(),
             self.new_peers_send.clone(),
@@ -190,7 +224,7 @@ impl<T: P2PMessage> IrohResource<T> {
             }
         }
     }
-    pub async fn broadcast(&mut self, msg: &T, mut f: impl FnMut(EndpointId)) {
+    pub async fn broadcast(&mut self, msg: &T) {
         let bytes = self.buffer.encode(msg);
         let mut disconnections = Vec::with_capacity(4);
         for (peer, (_, send)) in &mut self.connections {
@@ -200,15 +234,15 @@ impl<T: P2PMessage> IrohResource<T> {
         }
         for peer in disconnections {
             self.connections.remove(&peer);
-            f(peer);
+            self.peer_disconnects_send.send(peer).unwrap();
         }
     }
-    pub async fn send(&mut self, peer: EndpointId, msg: &T, f: impl FnOnce(EndpointId)) {
+    pub async fn send(&mut self, peer: EndpointId, msg: &T) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
             if send_bytes(send, bytes).await.is_err() {
                 self.connections.remove(&peer);
-                f(peer);
+                self.peer_disconnects_send.send(peer).unwrap();
             }
         }
     }
@@ -283,7 +317,7 @@ async fn receive<T: P2PMessage>(
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (send, recv) = connection.accept_bi().await?;
-        tokio::spawn(receive(
+        spawn(receive(
             EndpointId::from(connection.remote_id()),
             recv,
             self.messages.clone(),
@@ -297,16 +331,17 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
     mut peer_writer: MessageWriter<PeerConnected>,
     mut peer_failed_writer: MessageWriter<ConnectFailed>,
-    mut iroh: If<ResMut<IrohResource<T>>>,
-    tokio: Res<TokioTasksRuntime>,
+    iroh: If<Res<IrohResource<T>>>,
+    mut runtime: Runtime,
 ) {
-    tokio.runtime().block_on(iroh.update(|peer| {
+    let mut lock = iroh.lock();
+    runtime.spawn_return(async {lock.await.update(|peer| {
         peer_writer.write(PeerConnected::from(peer));
-    }));
-    while let Ok((peer, message)) = iroh.messages.try_recv() {
+    }).await});
+    while let Ok((peer, message)) = lock.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
     }
-    while let Ok(peer) = iroh.peer_connect_failed.try_recv() {
+    while let Ok(peer) = lock.peer_connect_failed.try_recv() {
         peer_failed_writer.write(ConnectFailed::from(peer));
     }
 }

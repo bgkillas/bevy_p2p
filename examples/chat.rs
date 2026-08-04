@@ -6,7 +6,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
 use bevy_p2p::iroh::EndpointId;
-use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohResource};
+use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohInner};
 use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
 use std::fs::OpenOptions;
@@ -54,7 +54,7 @@ fn on_disconnect(mut reader: PopulatedMessageReader<PeerDisconnected>) {
         println!("{} disconnect", peer.peer.fmt_short());
     }
 }
-fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
+fn startup(mut commands: Commands, iroh: Res<IrohInner<Msg>>) {
     let mut file = OpenOptions::new()
         .append(true)
         .write(true)
@@ -75,7 +75,7 @@ fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(&Msg::Chat(line));
+        net.broadcast(Msg::Chat(line));
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {

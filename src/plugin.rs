@@ -1,6 +1,5 @@
 use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected, PeerDisconnected};
 use bevy_app::{App, FixedPreUpdate, Plugin};
-use bevy_tokio_tasks::TokioTasksPlugin;
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
 pub struct P2PPlugin<T: P2PMessage> {
@@ -35,7 +34,8 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
         app.add_message::<PeerConnected>();
         app.add_message::<PeerDisconnected>();
         app.add_message::<MessageReceived<T>>();
-        app.add_plugins(TokioTasksPlugin::default());
+        #[cfg(not(target_family = "wasm"))]
+        app.add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default());
         app.add_systems(FixedPreUpdate, crate::iroh_res::receive_messages::<T>);
         app.add_observer(crate::iroh_res::on_bind::<T>);
         app.add_observer(crate::iroh_res::on_unbind::<T>);

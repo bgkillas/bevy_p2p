@@ -1,31 +1,31 @@
 #![allow(clippy::shadow_reuse)]
 use crate::iroh_res::IrohResource;
+use crate::runtime::Runtime;
 use bevy_ecs::message::{Message, MessageWriter};
-use bevy_ecs::system::{Res, ResMut, SystemParam};
-use bevy_tokio_tasks::TokioTasksRuntime;
+use bevy_ecs::system::{Res, SystemParam};
 use bitcode::{DecodeOwned, Encode};
 use iroh::EndpointId;
 #[derive(SystemParam)]
-pub struct Net<'w, T: P2PMessage> {
-    pub iroh: Option<ResMut<'w, IrohResource<T>>>,
-    pub tokio: Res<'w, TokioTasksRuntime>,
+pub struct Net<'w, 's, T: P2PMessage> {
+    pub iroh: Option<Res<'w, IrohResource<T>>>,
+    pub runtime: Runtime<'w, 's>,
     pub disconnect: MessageWriter<'w, PeerDisconnected>,
 }
-impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer: EndpointId, message: &T) {
-        if let Some(ir) = &mut self.iroh {
-            self.tokio
-                .runtime()
-                .block_on(ir.send(peer, message, |peer| {
-                    self.disconnect.write(PeerDisconnected::from(peer));
-                }));
+impl<T: P2PMessage> Net<'_, '_, T> {
+    pub fn send(&mut self, peer: EndpointId, message: T) {
+        if let Some(ir) = &self.iroh {
+            let iroh = ir.into_inner().clone();
+            self.runtime.spawn_loose(async move {
+                iroh.lock().send(peer, &message).await;
+            });
         }
     }
-    pub fn broadcast(&mut self, message: &T) {
-        if let Some(ir) = &mut self.iroh {
-            self.tokio.runtime().block_on(ir.broadcast(message, |peer| {
-                self.disconnect.write(PeerDisconnected::from(peer));
-            }));
+    pub fn broadcast(&mut self, message: T) {
+        if let Some(ir) = &self.iroh {
+            let iroh = ir.into_inner().clone();
+            self.runtime.spawn_loose(async move {
+                iroh.lock().broadcast(&message).await;
+            });
         }
     }
 }
