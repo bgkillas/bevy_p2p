@@ -7,8 +7,6 @@ use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, If, In, Res};
 use bevy_ecs::world::World;
-#[cfg(not(target_family = "wasm"))]
-use bevy_tokio_tasks::tokio;
 use bitcode::Buffer;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
@@ -61,17 +59,17 @@ impl IrohConnect {
 }
 pub(crate) fn on_connect<T: P2PMessage>(
     event: On<IrohConnect>,
-    mut runtime: Runtime,
+    runtime: Res<Runtime>,
     iroh_opt: Option<Res<IrohResource<T>>>,
 ) {
     let peer = event.peer;
     if let Some(iroh) = iroh_opt {
         let inner = iroh.inner.clone();
-        runtime.spawn_loose(async move {
+        runtime.spawn(async move {
             inner.lock().await.connect(peer);
         });
     } else {
-        runtime.spawn(insert_iroh, async move {
+        runtime.spawn_hook(insert_iroh, async move {
             match IrohResource::<T>::bind().await {
                 Ok(iroh) => {
                     iroh.inner.lock().await.connect(peer);
@@ -84,9 +82,9 @@ pub(crate) fn on_connect<T: P2PMessage>(
 }
 #[derive(Event)]
 pub struct IrohBind;
-pub(crate) fn on_bind<T: P2PMessage>(_: On<IrohBind>, mut runtime: Runtime, world: &World) {
+pub(crate) fn on_bind<T: P2PMessage>(_: On<IrohBind>, runtime: Res<Runtime>, world: &World) {
     assert!(!world.is_resource_added::<IrohResource<T>>());
-    runtime.spawn(insert_iroh, IrohResource::<T>::bind());
+    runtime.spawn_hook(insert_iroh, IrohResource::<T>::bind());
 }
 fn insert_iroh<T: P2PMessage>(
     In(iroh): In<Result<IrohResource<T>, BindError>>,
@@ -99,11 +97,11 @@ fn insert_iroh<T: P2PMessage>(
 pub struct IrohUnbind;
 pub(crate) fn on_unbind<T: P2PMessage>(
     _: On<IrohUnbind>,
-    mut runtime: Runtime,
+    runtime: Res<Runtime>,
     iroh: If<Res<IrohResource<T>>>,
 ) {
     let inner = iroh.inner.clone();
-    runtime.spawn(remove_iroh::<T, _>, async move {
+    runtime.spawn_hook(remove_iroh::<T, _>, async move {
         inner.lock().await.router.shutdown().await
     });
 }
@@ -330,11 +328,11 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
 pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
     iroh: If<Res<IrohResource<T>>>,
-    mut runtime: Runtime,
+    runtime: Res<Runtime>,
     mut commands: Commands,
 ) {
     let clone = iroh.inner.clone();
-    runtime.spawn_loose(async move {
+    runtime.spawn(async move {
         clone.lock().await.update().await;
     });
     while let Ok((peer, message)) = iroh.messages.try_recv() {

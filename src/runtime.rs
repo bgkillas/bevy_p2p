@@ -1,55 +1,57 @@
-#![allow(clippy::shadow_reuse)]
 use bevy_ecs::prelude::IntoSystem;
-use bevy_ecs::system::{SystemInput, SystemParam};
-#[derive(SystemParam)]
-pub struct Runtime<'w, 's> {
+use bevy_ecs::resource::Resource;
+use bevy_ecs::system::{Commands, Res, SystemInput};
+use std::sync::mpmc;
+use std::sync::mpmc::{Receiver, Sender};
+#[derive(Resource)]
+pub struct Runtime {
     #[cfg(not(target_family = "wasm"))]
-    pub runtime: bevy_ecs::system::Res<'w, bevy_tokio_tasks::TokioTasksRuntime>,
-    #[cfg(target_family = "wasm")]
-    pub commands: bevy_ecs::system::Commands<'w, 's>,
-    #[cfg(not(target_family = "wasm"))]
-    phantom: std::marker::PhantomData<&'s ()>,
+    pub runtime: tokio::runtime::Runtime,
+    pub tasks_send: Sender<Box<dyn FnOnce(&mut Commands) + Send + 'static>>,
+    pub tasks: Receiver<Box<dyn FnOnce(&mut Commands) + Send + 'static>>,
 }
-#[cfg(not(target_family = "wasm"))]
-impl Runtime<'_, '_> {
-    pub fn spawn<I: SystemInput + Send + 'static, M: 'static>(
-        &mut self,
+impl Default for Runtime {
+    fn default() -> Self {
+        let (tasks_send, tasks) = mpmc::channel();
+        Self {
+            #[cfg(not(target_family = "wasm"))]
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            tasks_send,
+            tasks,
+        }
+    }
+}
+impl Runtime {
+    pub fn spawn_hook<I: SystemInput + Send + 'static, M: 'static>(
+        &self,
         fun: impl IntoSystem<I, (), M> + Send + 'static,
         future: impl Future<Output = <I as SystemInput>::Inner<'static>> + Send + 'static,
     ) where
         for<'a> <I as SystemInput>::Inner<'a>: Send,
     {
-        self.runtime
-            .spawn_background_task(move |mut tasks| async move {
-                let ret = future.await;
-                tasks
-                    .run_on_main_thread(move |main| {
-                        main.world.run_system_cached_with(fun, ret).unwrap();
-                    })
-                    .await;
-            });
+        let send = self.tasks_send.clone();
+        self.spawn(async move {
+            let ret = future.await;
+            send.send(Box::new(|commands: &mut Commands| {
+                commands.run_system_cached_with(fun, ret);
+            }))
+            .unwrap();
+        });
     }
-    pub fn spawn_loose(&mut self, future: impl Future<Output = ()> + Send + 'static) {
-        self.runtime.runtime().spawn(future);
+    #[cfg(not(target_family = "wasm"))]
+    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(future);
+    }
+    #[cfg(target_family = "wasm")]
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+        wasm_bindgen_futures::spawn_local(future);
     }
 }
-#[cfg(target_family = "wasm")]
-impl Runtime<'_, '_> {
-    pub fn spawn<I: SystemInput + Send + 'static, M: 'static>(
-        &mut self,
-        fun: impl IntoSystem<I, (), M> + Send + 'static,
-        future: impl Future<Output = <I as SystemInput>::Inner<'static>> + 'static,
-    ) where
-        for<'a> <I as SystemInput>::Inner<'a>: Send,
-    {
-        let (sender, receiver) = std::sync::oneshot::channel();
-        wasm_bindgen_futures::spawn_local(async move {
-            sender.send(future.await).unwrap();
-        });
-        let ret = receiver.recv().unwrap();
-        self.commands.run_system_cached_with(fun, ret);
-    }
-    pub fn spawn_loose(&mut self, future: impl Future<Output = ()> + 'static) {
-        wasm_bindgen_futures::spawn_local(future);
+pub fn run_tasks(mut commands: Commands, runtime: Res<Runtime>) {
+    while let Ok(task) = runtime.tasks.try_recv() {
+        task(&mut commands);
     }
 }

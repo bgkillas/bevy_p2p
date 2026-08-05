@@ -5,7 +5,7 @@ use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
-use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected};
+use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected, PeerDisconnected};
 use bevy_p2p::iroh::EndpointId;
 use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{MessageReceived, Net};
@@ -45,7 +45,7 @@ fn on_connect_failed(event: On<ConnectFailed>) {
 fn on_connect(event: On<PeerConnected>) {
     println!("{} connect", event.peer.fmt_short());
 }
-fn on_disconnect(event: On<PeerConnected>) {
+fn on_disconnect(event: On<PeerDisconnected>) {
     println!("{} disconnect", event.peer.fmt_short());
 }
 fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) {

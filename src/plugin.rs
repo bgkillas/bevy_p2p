@@ -1,5 +1,7 @@
+use crate::iroh_res::{on_bind, on_connect, on_unbind, receive_messages};
 use crate::message::{MessageReceived, P2PMessage};
-use bevy_app::{App, FixedPreUpdate, Plugin};
+use crate::runtime::{Runtime, run_tasks};
+use bevy_app::{App, First, FixedPreUpdate, Plugin};
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
 pub struct P2PPlugin<T: P2PMessage> {
@@ -31,11 +33,11 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
             Err(err) => bevy_log::warn!("{err}"),
         }
         app.add_message::<MessageReceived<T>>();
-        #[cfg(not(target_family = "wasm"))]
-        app.add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default());
-        app.add_systems(FixedPreUpdate, crate::iroh_res::receive_messages::<T>);
-        app.add_observer(crate::iroh_res::on_bind::<T>);
-        app.add_observer(crate::iroh_res::on_unbind::<T>);
-        app.add_observer(crate::iroh_res::on_connect::<T>);
+        app.init_resource::<Runtime>();
+        app.add_systems(First, run_tasks);
+        app.add_systems(FixedPreUpdate, receive_messages::<T>);
+        app.add_observer(on_bind::<T>);
+        app.add_observer(on_unbind::<T>);
+        app.add_observer(on_connect::<T>);
     }
 }

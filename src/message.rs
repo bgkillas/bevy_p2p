@@ -6,15 +6,15 @@ use bevy_ecs::system::{Res, SystemParam};
 use bitcode::{DecodeOwned, Encode};
 use iroh::EndpointId;
 #[derive(SystemParam)]
-pub struct Net<'w, 's, T: P2PMessage> {
+pub struct Net<'w, T: P2PMessage> {
     pub iroh: Option<Res<'w, IrohResource<T>>>,
-    pub runtime: Runtime<'w, 's>,
+    pub runtime: Res<'w, Runtime>,
 }
-impl<T: P2PMessage> Net<'_, '_, T> {
+impl<T: P2PMessage> Net<'_, T> {
     pub fn send(&mut self, peer: EndpointId, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
-            self.runtime.spawn_loose(async move {
+            self.runtime.spawn(async move {
                 iroh.lock().await.send(peer, &message).await;
             });
         }
@@ -22,7 +22,7 @@ impl<T: P2PMessage> Net<'_, '_, T> {
     pub fn broadcast(&mut self, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
-            self.runtime.spawn_loose(async move {
+            self.runtime.spawn(async move {
                 iroh.lock().await.broadcast(&message).await;
             });
         }
