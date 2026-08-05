@@ -24,6 +24,7 @@ impl Default for Runtime {
         }
     }
 }
+#[cfg(not(target_family = "wasm"))]
 impl Runtime {
     pub fn spawn_hook<I: SystemInput + Send + 'static, M: 'static>(
         &self,
@@ -41,11 +42,28 @@ impl Runtime {
             .unwrap();
         });
     }
-    #[cfg(not(target_family = "wasm"))]
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         self.runtime.spawn(future);
     }
-    #[cfg(target_family = "wasm")]
+}
+#[cfg(target_family = "wasm")]
+impl Runtime {
+    pub fn spawn_hook<I: SystemInput + Send + 'static, M: 'static>(
+        &self,
+        fun: impl IntoSystem<I, (), M> + Send + 'static,
+        future: impl Future<Output = <I as SystemInput>::Inner<'static>> + 'static,
+    ) where
+        for<'a> <I as SystemInput>::Inner<'a>: Send,
+    {
+        let send = self.tasks_send.clone();
+        self.spawn(async move {
+            let ret = future.await;
+            send.send(Box::new(|commands: &mut Commands| {
+                commands.run_system_cached_with(fun, ret);
+            }))
+            .unwrap();
+        });
+    }
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
         wasm_bindgen_futures::spawn_local(future);
     }
