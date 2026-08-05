@@ -16,11 +16,10 @@ use iroh::{Endpoint, EndpointId};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::sync::{Arc};
-use tokio::sync::{Mutex, MutexGuard};
+use std::sync::Arc;
+use std::sync::mpmc::{self, Receiver, Sender};
 use tokio::spawn;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Mutex;
 #[cfg(target_family = "wasm")]
 use tokio_with_wasm as tokio;
 use zerocopy::IntoBytes as _;
@@ -28,25 +27,10 @@ const ALPN: &[u8] = b"bevy_p2p";
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub inner: Arc<Mutex<IrohInner<T>>>,
-}
-impl<T: P2PMessage> Clone for IrohResource<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-impl<T: P2PMessage> From<IrohInner<T>> for IrohResource<T> {
-    fn from(iroh: IrohInner<T>) -> Self {
-        IrohResource {
-            inner: Arc::new(Mutex::new(iroh)),
-        }
-    }
-}
-impl<T: P2PMessage> IrohResource<T> {
-    pub async fn lock(&self) -> MutexGuard<'_, IrohInner<T>> {
-        self.inner.lock().await
-    }
+    pub messages: Receiver<(EndpointId, T)>,
+    pub peer_connect_failed: Receiver<EndpointId>,
+    pub peer_disconnects: Receiver<EndpointId>,
+    pub my_id: EndpointId,
 }
 pub struct IrohInner<T: P2PMessage> {
     pub router: Router,
@@ -55,15 +39,12 @@ pub struct IrohInner<T: P2PMessage> {
     pub my_id: EndpointId,
     buffer: Buffer,
     new_peers: Receiver<(Connection, SendStream, bool)>,
-    new_peers_send: Arc<Sender<(Connection, SendStream, bool)>>,
-    messages: Receiver<(EndpointId, T)>,
-    messages_send: Arc<Sender<(EndpointId, T)>>,
+    new_peers_send: Sender<(Connection, SendStream, bool)>,
+    messages_send: Sender<(EndpointId, T)>,
     peer_relay: Receiver<Box<[EndpointId]>>,
-    peer_relay_send: Arc<Sender<Box<[EndpointId]>>>,
-    peer_connect_failed: Receiver<EndpointId>,
-    peer_connect_failed_send: Arc<Sender<EndpointId>>,
-    peer_disconnects_send: std::sync::mpsc::Sender<EndpointId>,
-    peer_disconnects: std::sync::mpsc::Receiver<EndpointId>,
+    peer_relay_send: Sender<Box<[EndpointId]>>,
+    peer_connect_failed_send: Sender<EndpointId>,
+    peer_disconnects_send: Sender<EndpointId>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -83,11 +64,11 @@ pub(crate) fn on_connect<T: P2PMessage>(
 ) {
     runtime.spawn_return(async {
         if let Some(iroh) = iroh_opt {
-            iroh.lock().await.connect(event.peer);
+            iroh.inner.lock().await.connect(event.peer);
         } else {
-            let mut iroh = IrohInner::<T>::bind().await.unwrap();
-            iroh.connect(event.peer);
-            commands.insert_resource(IrohResource::from(iroh));
+            let iroh = IrohResource::<T>::bind().await.unwrap();
+            iroh.inner.lock().await.connect(event.peer);
+            commands.insert_resource(iroh);
         }
     });
 }
@@ -99,11 +80,9 @@ pub(crate) fn on_bind<T: P2PMessage>(
     mut runtime: Runtime,
     world: &World,
 ) {
-    if world.is_resource_added::<IrohResource<T>>() {
-        panic!()
-    }
-    let iroh = runtime.spawn_return(IrohInner::<T>::bind()).unwrap();
-    commands.insert_resource(IrohResource::from(iroh));
+    assert!(!world.is_resource_added::<IrohResource<T>>());
+    let iroh = runtime.spawn_return(IrohResource::<T>::bind()).unwrap();
+    commands.insert_resource(iroh);
 }
 #[derive(Event)]
 pub struct IrohUnbind;
@@ -113,22 +92,20 @@ pub(crate) fn on_unbind<T: P2PMessage>(
     mut runtime: Runtime,
     iroh: If<Res<IrohResource<T>>>,
 ) {
-    runtime.spawn_return(async {iroh.lock().await.router.shutdown().await}).unwrap();
+    runtime
+        .spawn_return(async { iroh.inner.lock().await.router.shutdown().await })
+        .unwrap();
     commands.remove_resource::<IrohResource<T>>();
 }
-impl<T: P2PMessage> IrohInner<T> {
+impl<T: P2PMessage> IrohResource<T> {
     pub async fn bind() -> Result<Self, BindError> {
         let endpoint = Endpoint::bind(N0).await?;
         let my_id = EndpointId::from(endpoint.id());
-        let (new_tx, new_peers) = mpsc::channel(256);
-        let (message_tx, messages) = mpsc::channel(4096);
-        let (peer_tx, peer_relay) = mpsc::channel(256);
-        let (peer_connect_failed_tx, peer_connect_failed) = mpsc::channel(256);
-        let (peer_disconnects_send, peer_disconnects) = std::sync::mpsc::channel();
-        let messages_send = Arc::new(message_tx);
-        let new_peers_send = Arc::new(new_tx);
-        let peer_relay_send = Arc::new(peer_tx);
-        let peer_connect_failed_send = Arc::new(peer_connect_failed_tx);
+        let (new_peers_send, new_peers) = mpmc::channel();
+        let (messages_send, messages) = mpmc::channel();
+        let (peer_relay_send, peer_relay) = mpmc::channel();
+        let (peer_connect_failed_send, peer_connect_failed) = mpmc::channel();
+        let (peer_disconnects_send, peer_disconnects) = mpmc::channel();
         let router = Router::builder(endpoint)
             .accept(
                 ALPN,
@@ -142,7 +119,7 @@ impl<T: P2PMessage> IrohInner<T> {
         let buffer = Buffer::new();
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
         let pending = FxHashSet::with_capacity_and_hasher(8, FxBuildHasher);
-        Ok(Self {
+        let inner = Arc::new(Mutex::new(IrohInner {
             router,
             connections,
             pending,
@@ -150,33 +127,39 @@ impl<T: P2PMessage> IrohInner<T> {
             buffer,
             new_peers,
             new_peers_send,
-            messages,
             messages_send,
             peer_relay,
             peer_relay_send,
-            peer_connect_failed,
             peer_connect_failed_send,
             peer_disconnects_send,
+        }));
+        Ok(Self {
+            inner,
+            messages,
+            peer_connect_failed,
             peer_disconnects,
+            my_id,
         })
     }
+}
+impl<T: P2PMessage> IrohInner<T> {
     pub fn connect(&mut self, peer: EndpointId) {
         async fn connect<K: P2PMessage>(
             peer: EndpointId,
             endpoint: Endpoint,
-            sender: Arc<Sender<(Connection, SendStream, bool)>>,
-            messages_send: Arc<Sender<(EndpointId, K)>>,
-            peer_relay_send: Arc<Sender<Box<[EndpointId]>>>,
-            peer_connect_failed: Arc<Sender<EndpointId>>,
+            sender: Sender<(Connection, SendStream, bool)>,
+            messages_send: Sender<(EndpointId, K)>,
+            peer_relay_send: Sender<Box<[EndpointId]>>,
+            peer_connect_failed: Sender<EndpointId>,
         ) {
             match endpoint.connect(peer, ALPN).await {
                 Ok(connection) => {
                     let (send, recv) = connection.open_bi().await.unwrap();
                     spawn(receive(peer, recv, messages_send, peer_relay_send));
-                    sender.send((connection, send, true)).await.unwrap();
+                    sender.send((connection, send, true)).unwrap();
                 }
                 Err(_) => {
-                    peer_connect_failed.send(peer).await.unwrap();
+                    peer_connect_failed.send(peer).unwrap();
                 }
             }
         }
@@ -253,9 +236,9 @@ async fn send_bytes(send: &mut SendStream, bytes: &[u8]) -> Result<(), WriteErro
     send.write_all(bytes).await
 }
 struct Protocol<T: P2PMessage> {
-    pub sender: Arc<Sender<(Connection, SendStream, bool)>>,
-    pub messages: Arc<Sender<(EndpointId, T)>>,
-    pub peer_relay: Arc<Sender<Box<[EndpointId]>>>,
+    pub sender: Sender<(Connection, SendStream, bool)>,
+    pub messages: Sender<(EndpointId, T)>,
+    pub peer_relay: Sender<Box<[EndpointId]>>,
 }
 impl<T: P2PMessage> Debug for Protocol<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -264,9 +247,9 @@ impl<T: P2PMessage> Debug for Protocol<T> {
 }
 impl<T: P2PMessage> Protocol<T> {
     fn new(
-        sender: Arc<Sender<(Connection, SendStream, bool)>>,
-        messages: Arc<Sender<(EndpointId, T)>>,
-        peer_relay: Arc<Sender<Box<[EndpointId]>>>,
+        sender: Sender<(Connection, SendStream, bool)>,
+        messages: Sender<(EndpointId, T)>,
+        peer_relay: Sender<Box<[EndpointId]>>,
     ) -> Self {
         Self {
             sender,
@@ -283,8 +266,8 @@ async fn read_u32(recv: &mut RecvStream) -> Result<u32, ReadExactError> {
 async fn receive<T: P2PMessage>(
     peer: EndpointId,
     mut recv: RecvStream,
-    send: Arc<Sender<(EndpointId, T)>>,
-    peer_relay: Arc<Sender<Box<[EndpointId]>>>,
+    send: Sender<(EndpointId, T)>,
+    peer_relay: Sender<Box<[EndpointId]>>,
 ) -> Result<(), ReadExactError> {
     let size = read_u32(&mut recv).await?;
     if size != 0 {
@@ -299,7 +282,7 @@ async fn receive<T: P2PMessage>(
                 cap / size_of::<EndpointId>(),
             )
         };
-        peer_relay.send(peers.into_boxed_slice()).await.unwrap();
+        peer_relay.send(peers.into_boxed_slice()).unwrap();
     }
     let mut buffer = Buffer::new();
     let mut recv_buffer = Vec::new();
@@ -310,7 +293,7 @@ async fn receive<T: P2PMessage>(
         }
         recv.read_exact(&mut recv_buffer[..len]).await?;
         let val = buffer.decode(&recv_buffer[..len]).unwrap();
-        send.send((peer, val)).await.unwrap();
+        send.send((peer, val)).unwrap();
     }
     Ok(())
 }
@@ -323,7 +306,7 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
             self.messages.clone(),
             self.peer_relay.clone(),
         ));
-        self.sender.send((connection, send, false)).await.unwrap();
+        self.sender.send((connection, send, false)).unwrap();
         Ok(())
     }
 }
@@ -334,14 +317,20 @@ pub(crate) fn receive_messages<T: P2PMessage>(
     iroh: If<Res<IrohResource<T>>>,
     mut runtime: Runtime,
 ) {
-    let mut lock = iroh.lock();
-    runtime.spawn_return(async {lock.await.update(|peer| {
-        peer_writer.write(PeerConnected::from(peer));
-    }).await});
-    while let Ok((peer, message)) = lock.messages.try_recv() {
+    let clone = iroh.inner.clone();
+    runtime.spawn_return(async {
+        clone
+            .lock()
+            .await
+            .update(|peer| {
+                peer_writer.write(PeerConnected::from(peer));
+            })
+            .await;
+    });
+    while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
     }
-    while let Ok(peer) = lock.peer_connect_failed.try_recv() {
+    while let Ok(peer) = iroh.peer_connect_failed.try_recv() {
         peer_failed_writer.write(ConnectFailed::from(peer));
     }
 }

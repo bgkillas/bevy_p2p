@@ -14,17 +14,17 @@ pub struct Net<'w, 's, T: P2PMessage> {
 impl<T: P2PMessage> Net<'_, '_, T> {
     pub fn send(&mut self, peer: EndpointId, message: T) {
         if let Some(ir) = &self.iroh {
-            let iroh = ir.into_inner().clone();
+            let iroh = ir.inner.clone();
             self.runtime.spawn_loose(async move {
-                iroh.lock().send(peer, &message).await;
+                iroh.lock().await.send(peer, &message).await;
             });
         }
     }
     pub fn broadcast(&mut self, message: T) {
         if let Some(ir) = &self.iroh {
-            let iroh = ir.into_inner().clone();
+            let iroh = ir.inner.clone();
             self.runtime.spawn_loose(async move {
-                iroh.lock().broadcast(&message).await;
+                iroh.lock().await.broadcast(&message).await;
             });
         }
     }

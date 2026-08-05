@@ -6,7 +6,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
 use bevy_p2p::iroh::EndpointId;
-use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohInner};
+use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
 use bevy_p2p::plugin::P2PPlugin;
 use std::fs::OpenOptions;
@@ -54,7 +54,7 @@ fn on_disconnect(mut reader: PopulatedMessageReader<PeerDisconnected>) {
         println!("{} disconnect", peer.peer.fmt_short());
     }
 }
-fn startup(mut commands: Commands, iroh: Res<IrohInner<Msg>>) {
+fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
     let mut file = OpenOptions::new()
         .append(true)
         .write(true)
@@ -69,9 +69,8 @@ fn startup(mut commands: Commands, iroh: Res<IrohInner<Msg>>) {
             commands.trigger(IrohConnect::new(peer));
         }
     }
-    file.write_fmt(format_args!("{}\n", iroh.router.endpoint().id()))
-        .unwrap();
-    println!("{}", iroh.router.endpoint().id().fmt_short());
+    file.write_fmt(format_args!("{}\n", iroh.my_id)).unwrap();
+    println!("{}", iroh.my_id.fmt_short());
 }
 fn update(mut net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
