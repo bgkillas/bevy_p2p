@@ -1,13 +1,14 @@
 use bevy::MinimalPlugins;
 use bevy::app::{App, FixedUpdate};
-use bevy_app::{FixedPostUpdate, Startup};
 use bevy_ecs::message::PopulatedMessageReader;
+use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
+use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected};
 use bevy_p2p::iroh::EndpointId;
 use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohResource};
-use bevy_p2p::message::{ConnectFailed, MessageReceived, Net, PeerConnected, PeerDisconnected};
+use bevy_p2p::message::{MessageReceived, Net};
 use bevy_p2p::plugin::P2PPlugin;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write, stdin};
@@ -31,30 +32,23 @@ fn main() {
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
-    app.add_systems(Startup, startup);
-    app.add_systems(
-        FixedUpdate,
-        (update, connect_failed, on_connect, receive_message),
-    );
-    app.add_systems(FixedPostUpdate, on_disconnect);
+    app.add_systems(FixedUpdate, (update, receive_message));
+    app.add_observer(on_bind);
+    app.add_observer(on_connect_failed);
+    app.add_observer(on_connect);
+    app.add_observer(on_disconnect);
     app.run();
 }
-fn connect_failed(mut reader: PopulatedMessageReader<ConnectFailed>) {
-    for peer in reader.read() {
-        println!("{} failed", peer.peer.fmt_short());
-    }
+fn on_connect_failed(event: On<ConnectFailed>) {
+    println!("{} failed", event.peer.fmt_short());
 }
-fn on_connect(mut reader: PopulatedMessageReader<PeerConnected>) {
-    for peer in reader.read() {
-        println!("{} connect", peer.peer.fmt_short());
-    }
+fn on_connect(event: On<PeerConnected>) {
+    println!("{} connect", event.peer.fmt_short());
 }
-fn on_disconnect(mut reader: PopulatedMessageReader<PeerDisconnected>) {
-    for peer in reader.read() {
-        println!("{} disconnect", peer.peer.fmt_short());
-    }
+fn on_disconnect(event: On<PeerConnected>) {
+    println!("{} disconnect", event.peer.fmt_short());
 }
-fn startup(mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
+fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) {
     let mut file = OpenOptions::new()
         .append(true)
         .write(true)

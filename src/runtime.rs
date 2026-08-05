@@ -32,9 +32,6 @@ impl Runtime<'_, '_> {
     pub fn spawn_loose(&mut self, future: impl Future<Output = ()> + Send + 'static) {
         self.runtime.runtime().spawn(future);
     }
-    pub fn spawn_return<I>(&mut self, future: impl Future<Output = I>) -> I {
-        self.runtime.runtime().block_on(future)
-    }
 }
 #[cfg(target_family = "wasm")]
 impl Runtime<'_, '_> {
@@ -54,12 +51,5 @@ impl Runtime<'_, '_> {
     }
     pub fn spawn_loose(&mut self, future: impl Future<Output = ()> + 'static) {
         wasm_bindgen_futures::spawn_local(future);
-    }
-    pub fn spawn_return<I: 'static>(&mut self, future: impl Future<Output = I> + 'static) -> I {
-        let (sender, receiver) = std::sync::oneshot::channel();
-        wasm_bindgen_futures::spawn_local(async move {
-            sender.send(future.await).unwrap();
-        });
-        receiver.recv().unwrap()
     }
 }

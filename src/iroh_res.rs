@@ -1,10 +1,11 @@
-use crate::message::{ConnectFailed, MessageReceived, P2PMessage, PeerConnected};
+use crate::events::{Binded, ConnectFailed, PeerConnected, PeerDisconnected};
+use crate::message::{MessageReceived, P2PMessage};
 use crate::runtime::Runtime;
 use bevy_ecs::event::Event;
 use bevy_ecs::message::MessageWriter;
 use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
-use bevy_ecs::system::{Commands, If, Res};
+use bevy_ecs::system::{Commands, If, In, Res};
 use bevy_ecs::world::World;
 #[cfg(not(target_family = "wasm"))]
 use bevy_tokio_tasks::tokio;
@@ -30,6 +31,7 @@ pub struct IrohResource<T: P2PMessage> {
     pub messages: Receiver<(EndpointId, T)>,
     pub peer_connect_failed: Receiver<EndpointId>,
     pub peer_disconnects: Receiver<EndpointId>,
+    pub peer_connected: Receiver<EndpointId>,
     pub my_id: EndpointId,
 }
 pub struct IrohInner<T: P2PMessage> {
@@ -45,6 +47,7 @@ pub struct IrohInner<T: P2PMessage> {
     peer_relay_send: Sender<Box<[EndpointId]>>,
     peer_connect_failed_send: Sender<EndpointId>,
     peer_disconnects_send: Sender<EndpointId>,
+    peer_connected_send: Sender<EndpointId>,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -58,43 +61,54 @@ impl IrohConnect {
 }
 pub(crate) fn on_connect<T: P2PMessage>(
     event: On<IrohConnect>,
-    mut commands: Commands,
     mut runtime: Runtime,
     iroh_opt: Option<Res<IrohResource<T>>>,
 ) {
-    runtime.spawn_return(async {
-        if let Some(iroh) = iroh_opt {
-            iroh.inner.lock().await.connect(event.peer);
-        } else {
-            let iroh = IrohResource::<T>::bind().await.unwrap();
-            iroh.inner.lock().await.connect(event.peer);
-            commands.insert_resource(iroh);
-        }
-    });
+    let peer = event.peer;
+    if let Some(iroh) = iroh_opt {
+        let inner = iroh.inner.clone();
+        runtime.spawn_loose(async move {
+            inner.lock().await.connect(peer);
+        });
+    } else {
+        runtime.spawn(insert_iroh, async move {
+            match IrohResource::<T>::bind().await {
+                Ok(iroh) => {
+                    iroh.inner.lock().await.connect(peer);
+                    Ok(iroh)
+                }
+                e => e,
+            }
+        });
+    }
 }
 #[derive(Event)]
 pub struct IrohBind;
-pub(crate) fn on_bind<T: P2PMessage>(
-    _: On<IrohBind>,
-    mut commands: Commands,
-    mut runtime: Runtime,
-    world: &World,
-) {
+pub(crate) fn on_bind<T: P2PMessage>(_: On<IrohBind>, mut runtime: Runtime, world: &World) {
     assert!(!world.is_resource_added::<IrohResource<T>>());
-    let iroh = runtime.spawn_return(IrohResource::<T>::bind()).unwrap();
-    commands.insert_resource(iroh);
+    runtime.spawn(insert_iroh, IrohResource::<T>::bind());
+}
+fn insert_iroh<T: P2PMessage>(
+    In(iroh): In<Result<IrohResource<T>, BindError>>,
+    mut commands: Commands,
+) {
+    commands.insert_resource(iroh.unwrap());
+    commands.trigger(Binded);
 }
 #[derive(Event)]
 pub struct IrohUnbind;
 pub(crate) fn on_unbind<T: P2PMessage>(
     _: On<IrohUnbind>,
-    mut commands: Commands,
     mut runtime: Runtime,
     iroh: If<Res<IrohResource<T>>>,
 ) {
-    runtime
-        .spawn_return(async { iroh.inner.lock().await.router.shutdown().await })
-        .unwrap();
+    let inner = iroh.inner.clone();
+    runtime.spawn(remove_iroh::<T, _>, async move {
+        inner.lock().await.router.shutdown().await
+    });
+}
+fn remove_iroh<T: P2PMessage, E: Debug>(In(res): In<Result<(), E>>, mut commands: Commands) {
+    res.unwrap();
     commands.remove_resource::<IrohResource<T>>();
 }
 impl<T: P2PMessage> IrohResource<T> {
@@ -106,6 +120,7 @@ impl<T: P2PMessage> IrohResource<T> {
         let (peer_relay_send, peer_relay) = mpmc::channel();
         let (peer_connect_failed_send, peer_connect_failed) = mpmc::channel();
         let (peer_disconnects_send, peer_disconnects) = mpmc::channel();
+        let (peer_connected_send, peer_connected) = mpmc::channel();
         let router = Router::builder(endpoint)
             .accept(
                 ALPN,
@@ -132,12 +147,14 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_relay_send,
             peer_connect_failed_send,
             peer_disconnects_send,
+            peer_connected_send,
         }));
         Ok(Self {
             inner,
             messages,
             peer_connect_failed,
             peer_disconnects,
+            peer_connected,
             my_id,
         })
     }
@@ -184,7 +201,7 @@ impl<T: P2PMessage> IrohInner<T> {
         }
         Ok(())
     }
-    pub async fn update(&mut self, mut f: impl FnMut(EndpointId)) {
+    pub async fn update(&mut self) {
         while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
             let peer = EndpointId::from(connection.remote_id());
             if self.connections.contains_key(&peer) {
@@ -192,7 +209,7 @@ impl<T: P2PMessage> IrohInner<T> {
                     continue;
                 }
             } else {
-                f(peer);
+                self.peer_connected_send.send(peer).unwrap();
             }
             if self.relay_peer(&mut send).await.is_ok() {
                 self.connections.insert(peer, (connection, send));
@@ -312,25 +329,24 @@ impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
 }
 pub(crate) fn receive_messages<T: P2PMessage>(
     mut writer: MessageWriter<MessageReceived<T>>,
-    mut peer_writer: MessageWriter<PeerConnected>,
-    mut peer_failed_writer: MessageWriter<ConnectFailed>,
     iroh: If<Res<IrohResource<T>>>,
     mut runtime: Runtime,
+    mut commands: Commands,
 ) {
     let clone = iroh.inner.clone();
-    runtime.spawn_return(async {
-        clone
-            .lock()
-            .await
-            .update(|peer| {
-                peer_writer.write(PeerConnected::from(peer));
-            })
-            .await;
+    runtime.spawn_loose(async move {
+        clone.lock().await.update().await;
     });
     while let Ok((peer, message)) = iroh.messages.try_recv() {
         writer.write(MessageReceived { peer, message });
     }
+    while let Ok(peer) = iroh.peer_disconnects.try_recv() {
+        commands.trigger(PeerDisconnected { peer });
+    }
+    while let Ok(peer) = iroh.peer_connected.try_recv() {
+        commands.trigger(PeerConnected { peer });
+    }
     while let Ok(peer) = iroh.peer_connect_failed.try_recv() {
-        peer_failed_writer.write(ConnectFailed::from(peer));
+        commands.trigger(ConnectFailed { peer });
     }
 }
