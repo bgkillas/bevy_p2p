@@ -1,7 +1,7 @@
 use crate::iroh_res::{on_bind, on_connect, on_unbind, receive_messages};
 use crate::message::{MessageReceived, P2PMessage};
 use crate::runtime::{Runtime, run_tasks};
-use bevy_app::{App, First, FixedPreUpdate, Plugin};
+use bevy_app::{App, FixedFirst, FixedPreUpdate, Plugin};
 use std::marker::PhantomData;
 #[cfg(feature = "steam")]
 pub struct P2PPlugin<T: P2PMessage> {
@@ -34,7 +34,7 @@ impl<T: P2PMessage> Plugin for P2PPlugin<T> {
         }
         app.add_message::<MessageReceived<T>>();
         app.init_resource::<Runtime>();
-        app.add_systems(First, run_tasks);
+        app.add_systems(FixedFirst, run_tasks);
         app.add_systems(FixedPreUpdate, receive_messages::<T>);
         app.add_observer(on_bind::<T>);
         app.add_observer(on_unbind::<T>);

@@ -11,7 +11,7 @@ pub struct Net<'w, T: P2PMessage> {
     pub runtime: Res<'w, Runtime>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&mut self, peer: EndpointId, message: T) {
+    pub fn send(&self, peer: EndpointId, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
             self.runtime.spawn(async move {
@@ -19,7 +19,7 @@ impl<T: P2PMessage> Net<'_, T> {
             });
         }
     }
-    pub fn broadcast(&mut self, message: T) {
+    pub fn broadcast(&self, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
             self.runtime.spawn(async move {

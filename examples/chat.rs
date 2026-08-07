@@ -1,5 +1,6 @@
 use bevy::MinimalPlugins;
 use bevy::app::{App, FixedUpdate};
+use bevy_app::{PluginGroup, ScheduleRunnerPlugin};
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
@@ -16,6 +17,7 @@ use std::str::FromStr;
 use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 #[derive(Resource)]
 struct Lines {
     rx: Mutex<Receiver<String>>,
@@ -28,7 +30,9 @@ fn main() {
         }
     });
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
+    app.add_plugins(
+        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(0.1))),
+    );
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.world_mut().trigger(IrohBind);
     app.insert_resource(Lines { rx: Mutex::new(rx) });
@@ -66,7 +70,7 @@ fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) 
     file.write_fmt(format_args!("{}\n", iroh.my_id)).unwrap();
     println!("{}", iroh.my_id.fmt_short());
 }
-fn update(mut net: Net<Msg>, rx: Res<Lines>) {
+fn update(net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
         net.broadcast(Msg::Chat(line));
     }
