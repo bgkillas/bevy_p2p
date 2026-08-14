@@ -18,6 +18,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
+const ALPN: &[u8] = b"bevy_p2p_chat";
 #[derive(Resource)]
 struct Lines {
     rx: Mutex<Receiver<String>>,
@@ -34,7 +35,7 @@ fn main() {
         MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(0.1))),
     );
     app.add_plugins(P2PPlugin::<Msg>::new());
-    app.world_mut().trigger(IrohBind);
+    app.world_mut().trigger(IrohBind::new(ALPN));
     app.insert_resource(Lines { rx: Mutex::new(rx) });
     app.add_systems(FixedUpdate, (update, receive_message));
     app.add_observer(on_bind);
@@ -64,7 +65,7 @@ fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) 
     for line in BufReader::new(&file).lines().flatten() {
         if let Ok(endpoint) = EndpointId::from_str(&line) {
             let peer = EndpointId::from(endpoint);
-            commands.trigger(IrohConnect::new(peer));
+            commands.trigger(IrohConnect::new(peer, ALPN));
         }
     }
     file.write_fmt(format_args!("{}\n", iroh.my_id)).unwrap();

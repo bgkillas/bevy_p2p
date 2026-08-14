@@ -7,6 +7,7 @@ use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, If, In, Res};
 use bevy_ecs::world::World;
+use bimap::BiHashMap;
 use bitcode::Buffer;
 use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
@@ -22,7 +23,10 @@ use tokio::sync::Mutex;
 #[cfg(target_family = "wasm")]
 use tokio_with_wasm as tokio;
 use zerocopy::IntoBytes as _;
-const ALPN: &[u8] = b"bevy_p2p";
+#[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Debug)]
+pub struct PeerId {
+    pub id: u32,
+}
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub inner: Arc<Mutex<IrohInner<T>>>,
@@ -31,12 +35,17 @@ pub struct IrohResource<T: P2PMessage> {
     pub peer_disconnects: Receiver<EndpointId>,
     pub peer_connected: Receiver<EndpointId>,
     pub my_id: EndpointId,
+    pub my_peer_id: Option<PeerId>,
+    pub peer_ids: BiHashMap<EndpointId, PeerId>,
 }
 pub struct IrohInner<T: P2PMessage> {
+    pub alpn: &'static [u8],
     pub router: Router,
     pub connections: FxHashMap<EndpointId, (Connection, SendStream)>,
     pub pending: FxHashSet<EndpointId>,
     pub my_id: EndpointId,
+    pub my_peer_id: Option<PeerId>,
+    pub peer_ids: BiHashMap<EndpointId, PeerId>,
     buffer: Buffer,
     new_peers: Receiver<(Connection, SendStream, bool)>,
     new_peers_send: Sender<(Connection, SendStream, bool)>,
@@ -50,11 +59,12 @@ pub struct IrohInner<T: P2PMessage> {
 #[derive(Event)]
 pub struct IrohConnect {
     pub peer: EndpointId,
+    pub alpn: &'static [u8],
 }
 impl IrohConnect {
     #[must_use]
-    pub fn new(peer: EndpointId) -> Self {
-        Self { peer }
+    pub fn new(peer: EndpointId, alpn: &'static [u8]) -> Self {
+        Self { peer, alpn }
     }
 }
 pub(crate) fn on_connect<T: P2PMessage>(
@@ -63,16 +73,17 @@ pub(crate) fn on_connect<T: P2PMessage>(
     iroh_opt: Option<Res<IrohResource<T>>>,
 ) {
     let peer = event.peer;
+    let alpn = event.alpn;
     if let Some(iroh) = iroh_opt {
         let inner = iroh.inner.clone();
         runtime.spawn(async move {
-            inner.lock().await.connect(peer);
+            inner.lock().await.connect(alpn, peer);
         });
     } else {
         runtime.spawn_hook(insert_iroh, async move {
-            match IrohResource::<T>::bind().await {
+            match IrohResource::<T>::bind(alpn).await {
                 Ok(iroh) => {
-                    iroh.inner.lock().await.connect(peer);
+                    iroh.inner.lock().await.connect(alpn, peer);
                     Ok(iroh)
                 }
                 e => e,
@@ -81,10 +92,18 @@ pub(crate) fn on_connect<T: P2PMessage>(
     }
 }
 #[derive(Event)]
-pub struct IrohBind;
-pub(crate) fn on_bind<T: P2PMessage>(_: On<IrohBind>, runtime: Res<Runtime>, world: &World) {
+pub struct IrohBind {
+    alpn: &'static [u8],
+}
+impl IrohBind {
+    #[must_use]
+    pub fn new(alpn: &'static [u8]) -> Self {
+        Self { alpn }
+    }
+}
+pub(crate) fn on_bind<T: P2PMessage>(event: On<IrohBind>, runtime: Res<Runtime>, world: &World) {
     assert!(!world.is_resource_added::<IrohResource<T>>());
-    runtime.spawn_hook(insert_iroh, IrohResource::<T>::bind());
+    runtime.spawn_hook(insert_iroh, IrohResource::<T>::bind(event.alpn));
 }
 fn insert_iroh<T: P2PMessage>(
     In(iroh): In<Result<IrohResource<T>, BindError>>,
@@ -110,7 +129,7 @@ fn remove_iroh<T: P2PMessage, E: Debug>(In(res): In<Result<(), E>>, mut commands
     commands.remove_resource::<IrohResource<T>>();
 }
 impl<T: P2PMessage> IrohResource<T> {
-    pub async fn bind() -> Result<Self, BindError> {
+    pub async fn bind(alpn: &'static [u8]) -> Result<Self, BindError> {
         let endpoint = Endpoint::bind(N0).await?;
         let my_id = EndpointId::from(endpoint.id());
         let (new_peers_send, new_peers) = mpmc::channel();
@@ -121,7 +140,7 @@ impl<T: P2PMessage> IrohResource<T> {
         let (peer_connected_send, peer_connected) = mpmc::channel();
         let router = Router::builder(endpoint)
             .accept(
-                ALPN,
+                alpn,
                 Protocol::new(
                     new_peers_send.clone(),
                     messages_send.clone(),
@@ -133,10 +152,13 @@ impl<T: P2PMessage> IrohResource<T> {
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
         let pending = FxHashSet::with_capacity_and_hasher(8, FxBuildHasher);
         let inner = Arc::new(Mutex::new(IrohInner {
+            alpn,
             router,
             connections,
             pending,
             my_id,
+            my_peer_id: None,
+            peer_ids: BiHashMap::new(),
             buffer,
             new_peers,
             new_peers_send,
@@ -154,12 +176,15 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_disconnects,
             peer_connected,
             my_id,
+            my_peer_id: None,
+            peer_ids: BiHashMap::new(),
         })
     }
 }
 impl<T: P2PMessage> IrohInner<T> {
-    pub fn connect(&mut self, peer: EndpointId) {
+    pub fn connect(&mut self, alpn: &'static [u8], peer: EndpointId) {
         async fn connect<K: P2PMessage>(
+            alpn: &'static [u8],
             peer: EndpointId,
             endpoint: Endpoint,
             sender: Sender<(Connection, SendStream, bool)>,
@@ -167,7 +192,7 @@ impl<T: P2PMessage> IrohInner<T> {
             peer_relay_send: Sender<Box<[EndpointId]>>,
             peer_connect_failed: Sender<EndpointId>,
         ) {
-            match endpoint.connect(peer, ALPN).await {
+            match endpoint.connect(peer, alpn).await {
                 Ok(connection) => {
                     let (send, recv) = connection.open_bi().await.unwrap();
                     spawn(receive(peer, recv, messages_send, peer_relay_send));
@@ -183,6 +208,7 @@ impl<T: P2PMessage> IrohInner<T> {
         }
         self.pending.insert(peer);
         spawn(connect(
+            alpn,
             peer,
             self.router.endpoint().clone(),
             self.new_peers_send.clone(),
@@ -217,7 +243,7 @@ impl<T: P2PMessage> IrohInner<T> {
         while let Ok(peers) = self.peer_relay.try_recv() {
             for peer in peers {
                 if peer != self.my_id {
-                    self.connect(peer);
+                    self.connect(self.alpn, peer);
                 }
             }
         }

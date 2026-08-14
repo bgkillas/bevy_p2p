@@ -13,20 +13,21 @@ steam=["dep:steamworks"]
 [dependencies]
 steamworks = {version = "0.13.1", optional = true}
 iroh = "1.0.3"
-bevy_ecs = {version = "0.19.0", default-features = false}
-bevy_app = {version = "0.19.0", default-features = false}
-bevy_log = {version = "0.19.0", default-features = false}
+bevy_ecs = {version = "0.19.1", default-features = false}
+bevy_app = {version = "0.19.1", default-features = false}
+bevy_log = {version = "0.19.1", default-features = false}
 bitcode = {git = "https://github.com/SoftbearStudios/bitcode", branch = "custom_encoder"}
 rustc-hash = "2.1.3"
 zerocopy = "0.9.0-alpha.0"
 tokio = {version = "1.53.1", features = ["sync"]}
+bimap = "0.6.3"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen-futures = "0.4.77"
-tokio_with_wasm = {version = "0.10.0", features = ["macros", "rt", "sync"]}
+tokio_with_wasm = {version = "0.10.1", features = ["macros", "rt", "sync"]}
 
 [dev-dependencies]
-bevy = {version = "0.19.0", default-features=false, features = ["debug"]}
+bevy = {version = "0.19.1", default-features=false, features = ["debug"]}
 
 [lints.clippy]
 pedantic = {level = "warn", priority = -1}
