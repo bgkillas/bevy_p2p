@@ -23,20 +23,14 @@ use tokio::sync::Mutex;
 #[cfg(target_family = "wasm")]
 use tokio_with_wasm as tokio;
 use zerocopy::IntoBytes as _;
-#[derive(Clone, Copy, Eq, Hash, PartialEq, PartialOrd, Debug)]
-pub struct PeerId {
-    pub id: u32,
-}
 #[derive(Resource)]
 pub struct IrohResource<T: P2PMessage> {
     pub inner: Arc<Mutex<IrohInner<T>>>,
-    pub messages: Receiver<(EndpointId, T)>,
-    pub peer_connect_failed: Receiver<EndpointId>,
-    pub peer_disconnects: Receiver<EndpointId>,
-    pub peer_connected: Receiver<EndpointId>,
+    messages: Receiver<(EndpointId, T)>,
+    peer_connect_failed: Receiver<EndpointId>,
+    peer_disconnects: Receiver<EndpointId>,
+    peer_connected: Receiver<EndpointId>,
     pub my_id: EndpointId,
-    pub my_peer_id: Option<PeerId>,
-    pub peer_ids: BiHashMap<EndpointId, PeerId>,
 }
 pub struct IrohInner<T: P2PMessage> {
     pub alpn: &'static [u8],
@@ -44,8 +38,6 @@ pub struct IrohInner<T: P2PMessage> {
     pub connections: FxHashMap<EndpointId, (Connection, SendStream)>,
     pub pending: FxHashSet<EndpointId>,
     pub my_id: EndpointId,
-    pub my_peer_id: Option<PeerId>,
-    pub peer_ids: BiHashMap<EndpointId, PeerId>,
     buffer: Buffer,
     new_peers: Receiver<(Connection, SendStream, bool)>,
     new_peers_send: Sender<(Connection, SendStream, bool)>,
@@ -151,14 +143,14 @@ impl<T: P2PMessage> IrohResource<T> {
         let buffer = Buffer::new();
         let connections = FxHashMap::with_capacity_and_hasher(8, FxBuildHasher);
         let pending = FxHashSet::with_capacity_and_hasher(8, FxBuildHasher);
+        let mut peer_ids = BiHashMap::new();
+        peer_ids.insert(my_id, 0);
         let inner = Arc::new(Mutex::new(IrohInner {
             alpn,
             router,
             connections,
             pending,
             my_id,
-            my_peer_id: None,
-            peer_ids: BiHashMap::new(),
             buffer,
             new_peers,
             new_peers_send,
@@ -176,8 +168,6 @@ impl<T: P2PMessage> IrohResource<T> {
             peer_disconnects,
             peer_connected,
             my_id,
-            my_peer_id: None,
-            peer_ids: BiHashMap::new(),
         })
     }
 }

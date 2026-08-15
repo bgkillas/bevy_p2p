@@ -8,3 +8,6 @@ pub mod runtime;
 pub mod steam;
 pub use bitcode;
 pub use iroh;
+pub use tokio;
+#[cfg(target_family = "wasm")]
+use tokio_with_wasm as tokio;
