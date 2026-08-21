@@ -45,6 +45,9 @@ impl Runtime {
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         self.runtime.spawn(future);
     }
+    pub fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        self.runtime.block_on(future)
+    }
 }
 #[cfg(target_family = "wasm")]
 impl Runtime {
@@ -66,6 +69,9 @@ impl Runtime {
     }
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
         wasm_bindgen_futures::spawn_local(future);
+    }
+    pub fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        bevy_platform::future::block_on(future)
     }
 }
 pub fn run_tasks(mut commands: Commands, runtime: Res<Runtime>) {

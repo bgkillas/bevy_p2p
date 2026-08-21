@@ -14,6 +14,7 @@ steam=["dep:steamworks"]
 steamworks = {version = "0.13.1", optional = true}
 iroh = "1.0.3"
 bevy_ecs = {version = "0.19.1", default-features = false}
+bevy_platform = {version = "0.19.1", default-features = false}
 bevy_app = {version = "0.19.1", default-features = false}
 bevy_log = {version = "0.19.1", default-features = false}
 bitcode = {git = "https://github.com/SoftbearStudios/bitcode", branch = "custom_encoder"}
