@@ -1,8 +1,10 @@
 use bevy_ecs::prelude::IntoSystem;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Res, SystemInput};
+use std::num::NonZeroUsize;
 use std::sync::mpmc;
 use std::sync::mpmc::{Receiver, Sender};
+use std::thread::available_parallelism;
 #[derive(Resource)]
 pub struct Runtime {
     #[cfg(not(target_family = "wasm"))]
@@ -13,9 +15,11 @@ pub struct Runtime {
 impl Default for Runtime {
     fn default() -> Self {
         let (tasks_send, tasks) = mpmc::channel();
+        let cpus = available_parallelism().map_or(1, NonZeroUsize::get);
         Self {
             #[cfg(not(target_family = "wasm"))]
             runtime: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads((cpus - 2).max(1))
                 .enable_all()
                 .build()
                 .unwrap(),
