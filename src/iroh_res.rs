@@ -221,17 +221,13 @@ impl<T: P2PMessage> IrohInner<T> {
         ));
     }
     pub async fn relay_peer(&mut self, send: &mut SendStream) -> Result<(), WriteError> {
+        let compression = Compression::None;
         let peers = PeerRelay {
             peers: self.connections.keys().copied().collect(),
         };
-        send_msg(
-            send,
-            Compression::Compressed,
-            &mut self.compression_buffer,
-            &mut self.buffer,
-            &peers,
-        )
-        .await
+        let bytes = self.buffer.encode(&peers);
+        let len = get_bytes(compression, &mut self.compression_buffer, bytes);
+        send_msg(send, compression, &self.compression_buffer[..len], bytes).await
     }
     pub async fn update(&mut self) {
         while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
@@ -256,19 +252,14 @@ impl<T: P2PMessage> IrohInner<T> {
             }
         }
     }
-    //TODO move encode/compression out of loop
     pub async fn broadcast(&mut self, compression: Compression, msg: &T) {
         let mut disconnections = Vec::with_capacity(4);
+        let bytes = self.buffer.encode(msg);
+        let len = get_bytes(compression, &mut self.compression_buffer, bytes);
         for (peer, (_, send)) in &mut self.connections {
-            if send_msg(
-                send,
-                compression,
-                &mut self.compression_buffer,
-                &mut self.buffer,
-                msg,
-            )
-            .await
-            .is_err()
+            if send_msg(send, compression, &self.compression_buffer[..len], bytes)
+                .await
+                .is_err()
             {
                 disconnections.push(*peer);
             }
@@ -280,15 +271,11 @@ impl<T: P2PMessage> IrohInner<T> {
     }
     pub async fn send(&mut self, peer: EndpointId, compression: Compression, msg: &T) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
-            if send_msg(
-                send,
-                compression,
-                &mut self.compression_buffer,
-                &mut self.buffer,
-                msg,
-            )
-            .await
-            .is_err()
+            let bytes = self.buffer.encode(msg);
+            let len = get_bytes(compression, &mut self.compression_buffer, bytes);
+            if send_msg(send, compression, &self.compression_buffer[..len], bytes)
+                .await
+                .is_err()
             {
                 self.connections.remove(&peer);
                 self.peer_disconnects_send.send(peer).unwrap();
@@ -296,30 +283,33 @@ impl<T: P2PMessage> IrohInner<T> {
         }
     }
 }
-async fn send_msg<T: Encode>(
-    send: &mut SendStream,
-    compression: Compression,
-    compression_buffer: &mut Vec<u8>,
-    buffer: &mut Buffer,
-    msg: &T,
-) -> Result<(), WriteError> {
-    let bytes = buffer.encode(msg);
+fn get_bytes(compression: Compression, compression_buffer: &mut Vec<u8>, bytes: &[u8]) -> usize {
     match compression {
         Compression::Compressed => {
             compression_buffer.clear();
             let max_len = get_maximum_output_size(bytes.len());
             compression_buffer.resize(max_len, 0);
-            let new_len =
-                lz4_flex::compress_into(bytes, &mut compression_buffer[0..max_len]).unwrap();
-            let len = u32::try_from(new_len).unwrap();
-            let old_len = u32::try_from(bytes.len()).unwrap();
+            lz4_flex::compress_into(bytes, &mut compression_buffer[0..max_len]).unwrap()
+        }
+        Compression::None => 0,
+    }
+}
+async fn send_msg(
+    send: &mut SendStream,
+    compression: Compression,
+    compression_buffer: &[u8],
+    bytes: &[u8],
+) -> Result<(), WriteError> {
+    let len = u32::try_from(bytes.len()).unwrap();
+    match compression {
+        Compression::Compressed => {
+            let compressed_len = u32::try_from(compression_buffer.len()).unwrap();
             send.write_all(&[1]).await?;
+            send.write_all(compressed_len.as_bytes()).await?;
             send.write_all(len.as_bytes()).await?;
-            send.write_all(old_len.as_bytes()).await?;
-            send.write_all(&compression_buffer[0..new_len]).await?;
+            send.write_all(compression_buffer).await?;
         }
         Compression::None => {
-            let len = u32::try_from(bytes.len()).unwrap();
             send.write_all(&[0]).await?;
             send.write_all(len.as_bytes()).await?;
             send.write_all(bytes).await?;
@@ -376,7 +366,9 @@ async fn receive<T: P2PMessage>(
         &mut compression_buffer,
     )
     .await?;
-    peer_relay.send(relay.peers).unwrap();
+    if !relay.peers.is_empty() {
+        peer_relay.send(relay.peers).unwrap();
+    }
     loop {
         let val = receive_messege(
             &mut recv,
