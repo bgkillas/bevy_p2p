@@ -1,4 +1,5 @@
 #![feature(mpmc_channel)]
+mod coder;
 pub mod events;
 pub mod iroh_res;
 pub mod message;
