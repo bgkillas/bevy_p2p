@@ -8,7 +8,7 @@ use bevy_ecs::system::{Commands, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
 use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected, PeerDisconnected};
 use bevy_p2p::iroh::EndpointId;
-use bevy_p2p::iroh_res::{IrohBind, IrohConnect, IrohResource};
+use bevy_p2p::iroh_res::{Compression, IrohBind, IrohConnect, IrohResource};
 use bevy_p2p::message::{MessageReceived, Net};
 use bevy_p2p::plugin::P2PPlugin;
 use std::fs::OpenOptions;
@@ -73,7 +73,7 @@ fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) 
 }
 fn update(net: Net<Msg>, rx: Res<Lines>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(Msg::Chat(line));
+        net.broadcast(Compression::Compressed, Msg::Chat(line));
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {

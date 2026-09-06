@@ -1,5 +1,5 @@
 #![allow(clippy::shadow_reuse)]
-use crate::iroh_res::IrohResource;
+use crate::iroh_res::{Compression, IrohResource};
 use crate::runtime::Runtime;
 use bevy_ecs::message::Message;
 use bevy_ecs::system::{Res, SystemParam};
@@ -11,19 +11,19 @@ pub struct Net<'w, T: P2PMessage> {
     pub runtime: Res<'w, Runtime>,
 }
 impl<T: P2PMessage> Net<'_, T> {
-    pub fn send(&self, peer: EndpointId, message: T) {
+    pub fn send(&self, peer: EndpointId, compression: Compression, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
             self.runtime.spawn(async move {
-                iroh.lock().await.send(peer, &message).await;
+                iroh.lock().await.send(peer, compression, &message).await;
             });
         }
     }
-    pub fn broadcast(&self, message: T) {
+    pub fn broadcast(&self, compression: Compression, message: T) {
         if let Some(ir) = &self.iroh {
             let iroh = ir.inner.clone();
             self.runtime.spawn(async move {
-                iroh.lock().await.broadcast(&message).await;
+                iroh.lock().await.broadcast(compression, &message).await;
             });
         }
     }

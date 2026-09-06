@@ -13,6 +13,7 @@ use iroh::endpoint::presets::N0;
 use iroh::endpoint::{BindError, Connection, ReadExactError, RecvStream, SendStream, WriteError};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId};
+use lz4_flex::block::get_maximum_output_size;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
@@ -39,6 +40,7 @@ pub struct IrohInner<T: P2PMessage> {
     pub pending: FxHashSet<EndpointId>,
     pub my_id: EndpointId,
     buffer: Buffer,
+    compression_buffer: Vec<u8>,
     new_peers: Receiver<(Connection, SendStream, bool)>,
     new_peers_send: Sender<(Connection, SendStream, bool)>,
     messages_send: Sender<(EndpointId, T)>,
@@ -47,6 +49,11 @@ pub struct IrohInner<T: P2PMessage> {
     peer_connect_failed_send: Sender<EndpointId>,
     peer_disconnects_send: Sender<EndpointId>,
     peer_connected_send: Sender<EndpointId>,
+}
+#[derive(Clone, Copy)]
+pub enum Compression {
+    Compressed,
+    None,
 }
 #[derive(Event)]
 pub struct IrohConnect {
@@ -152,6 +159,7 @@ impl<T: P2PMessage> IrohResource<T> {
             pending,
             my_id,
             buffer,
+            compression_buffer: Vec::new(),
             new_peers,
             new_peers_send,
             messages_send,
@@ -238,11 +246,14 @@ impl<T: P2PMessage> IrohInner<T> {
             }
         }
     }
-    pub async fn broadcast(&mut self, msg: &T) {
+    pub async fn broadcast(&mut self, compression: Compression, msg: &T) {
         let bytes = self.buffer.encode(msg);
         let mut disconnections = Vec::with_capacity(4);
         for (peer, (_, send)) in &mut self.connections {
-            if send_bytes(send, bytes).await.is_err() {
+            if send_bytes(send, compression, &mut self.compression_buffer, bytes)
+                .await
+                .is_err()
+            {
                 disconnections.push(*peer);
             }
         }
@@ -251,20 +262,46 @@ impl<T: P2PMessage> IrohInner<T> {
             self.peer_disconnects_send.send(peer).unwrap();
         }
     }
-    pub async fn send(&mut self, peer: EndpointId, msg: &T) {
+    pub async fn send(&mut self, peer: EndpointId, compression: Compression, msg: &T) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
-            if send_bytes(send, bytes).await.is_err() {
+            if send_bytes(send, compression, &mut self.compression_buffer, bytes)
+                .await
+                .is_err()
+            {
                 self.connections.remove(&peer);
                 self.peer_disconnects_send.send(peer).unwrap();
             }
         }
     }
 }
-async fn send_bytes(send: &mut SendStream, bytes: &[u8]) -> Result<(), WriteError> {
-    let len = u32::try_from(bytes.len()).unwrap();
-    send.write_all(len.as_bytes()).await?;
-    send.write_all(bytes).await
+async fn send_bytes(
+    send: &mut SendStream,
+    compression: Compression,
+    buffer: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<(), WriteError> {
+    match compression {
+        Compression::Compressed => {
+            buffer.clear();
+            let max_len = get_maximum_output_size(bytes.len());
+            buffer.resize(max_len, 0);
+            let new_len = lz4_flex::compress_into(bytes, &mut buffer[0..max_len]).unwrap();
+            let len = u32::try_from(new_len).unwrap();
+            let old_len = u32::try_from(bytes.len()).unwrap();
+            send.write_all(&[1]).await?;
+            send.write_all(len.as_bytes()).await?;
+            send.write_all(old_len.as_bytes()).await?;
+            send.write_all(&buffer[0..new_len]).await?;
+        }
+        Compression::None => {
+            let len = u32::try_from(bytes.len()).unwrap();
+            send.write_all(&[0]).await?;
+            send.write_all(len.as_bytes()).await?;
+            send.write_all(bytes).await?;
+        }
+    }
+    Ok(())
 }
 struct Protocol<T: P2PMessage> {
     pub sender: Sender<(Connection, SendStream, bool)>,
@@ -288,6 +325,11 @@ impl<T: P2PMessage> Protocol<T> {
             peer_relay,
         }
     }
+}
+async fn read_u8(recv: &mut RecvStream) -> Result<u8, ReadExactError> {
+    let mut val = 0;
+    recv.read_exact(val.as_mut_bytes()).await?;
+    Ok(val)
 }
 async fn read_u32(recv: &mut RecvStream) -> Result<u32, ReadExactError> {
     let mut val = 0;
@@ -317,16 +359,37 @@ async fn receive<T: P2PMessage>(
     }
     let mut buffer = Buffer::new();
     let mut recv_buffer = Vec::new();
-    while let Ok(size) = read_u32(&mut recv).await {
-        let len = size as usize;
-        if len > recv_buffer.len() {
-            recv_buffer.resize(len, 0);
+    let mut compression_buffer = Vec::new();
+    loop {
+        let is_compressed = read_u8(&mut recv).await?;
+        match is_compressed {
+            0 => {
+                let len = read_u32(&mut recv).await? as usize;
+                recv_buffer.resize(len, 0);
+                recv.read_exact(&mut recv_buffer[..len]).await?;
+                let val = buffer.decode(&recv_buffer[..len]).unwrap();
+                send.send((peer, val)).unwrap();
+            }
+            1 => {
+                let len = read_u32(&mut recv).await? as usize;
+                let uncompressed_len = read_u32(&mut recv).await? as usize;
+                recv_buffer.resize(len, 0);
+                compression_buffer.resize(uncompressed_len, 0);
+                recv.read_exact(&mut recv_buffer[..len]).await?;
+                let uncompressed = lz4_flex::decompress_into(
+                    &recv_buffer[..len],
+                    &mut compression_buffer[..uncompressed_len],
+                )
+                .unwrap();
+                assert_eq!(uncompressed, uncompressed_len);
+                let val = buffer
+                    .decode(&compression_buffer[..uncompressed_len])
+                    .unwrap();
+                send.send((peer, val)).unwrap();
+            }
+            _ => unreachable!(),
         }
-        recv.read_exact(&mut recv_buffer[..len]).await?;
-        let val = buffer.decode(&recv_buffer[..len]).unwrap();
-        send.send((peer, val)).unwrap();
     }
-    Ok(())
 }
 impl<T: P2PMessage> ProtocolHandler for Protocol<T> {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
