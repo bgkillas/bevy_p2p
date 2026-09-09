@@ -4,7 +4,7 @@ use bevy_app::{PluginGroup, ScheduleRunnerPlugin};
 use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
-use bevy_ecs::system::{Commands, Res};
+use bevy_ecs::system::{Commands, Local, Res};
 use bevy_p2p::bitcode::{Decode, Encode};
 use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected, PeerDisconnected};
 use bevy_p2p::iroh::EndpointId;
@@ -18,6 +18,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
+use bevy_log::LogPlugin;
 const ALPN: &[u8] = b"bevy_p2p_chat";
 #[derive(Resource)]
 struct Lines {
@@ -34,6 +35,7 @@ fn main() {
     app.add_plugins(
         MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(0.1))),
     );
+    app.add_plugins(LogPlugin::default());
     app.add_plugins(P2PPlugin::<Msg>::new());
     app.world_mut().trigger(IrohBind::new(ALPN));
     app.insert_resource(Lines { rx: Mutex::new(rx) });
@@ -71,9 +73,17 @@ fn on_bind(_: On<Binded>, mut commands: Commands, iroh: Res<IrohResource<Msg>>) 
     file.write_fmt(format_args!("{}\n", iroh.my_id)).unwrap();
     println!("{}", iroh.my_id.fmt_short());
 }
-fn update(net: Net<Msg>, rx: Res<Lines>) {
+fn update(net: Net<Msg>, rx: Res<Lines>, mut compressed: Local<bool>) {
     if let Ok(line) = rx.rx.lock().unwrap().try_recv() {
-        net.broadcast(Compression::Compressed, Msg::Chat(line));
+        *compressed = !*compressed;
+        net.broadcast(
+            if *compressed {
+                Compression::TestCompression
+            } else {
+                Compression::None
+            },
+            Msg::Chat(line),
+        );
     }
 }
 fn receive_message(mut reader: PopulatedMessageReader<MessageReceived<Msg>>) {

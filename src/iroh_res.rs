@@ -8,6 +8,7 @@ use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, If, In, Res};
 use bevy_ecs::world::World;
+use bevy_log::info;
 use bimap::BiHashMap;
 use bitcode::{Buffer, Decode, Encode};
 use iroh::endpoint::presets::N0;
@@ -55,8 +56,11 @@ struct PeerRelay {
     #[bitcode(with = "DataCoderBoxId")]
     pub peers: Box<[EndpointId]>,
 }
+const MESSAGE_UNCOMPRESSED: u8 = 0;
+const MESSAGE_COMPRESSED: u8 = 1;
 #[derive(Clone, Copy)]
 pub enum Compression {
+    TestCompression,
     Compressed,
     None,
 }
@@ -226,8 +230,8 @@ impl<T: P2PMessage> IrohInner<T> {
             peers: self.connections.keys().copied().collect(),
         };
         let bytes = self.buffer.encode(&peers);
-        let len = get_bytes(compression, &mut self.compression_buffer, bytes);
-        send_msg(send, compression, &self.compression_buffer[..len], bytes).await
+        get_bytes(compression, &mut self.compression_buffer, bytes);
+        send_msg(send, compression, &self.compression_buffer, bytes).await
     }
     pub async fn update(&mut self) {
         while let Ok((connection, mut send, owner)) = self.new_peers.try_recv() {
@@ -253,11 +257,14 @@ impl<T: P2PMessage> IrohInner<T> {
         }
     }
     pub async fn broadcast(&mut self, compression: Compression, msg: &T) {
-        let mut disconnections = Vec::with_capacity(4);
+        if self.connections.is_empty() {
+            return;
+        }
+        let mut disconnections = Vec::new();
         let bytes = self.buffer.encode(msg);
-        let len = get_bytes(compression, &mut self.compression_buffer, bytes);
+        get_bytes(compression, &mut self.compression_buffer, bytes);
         for (peer, (_, send)) in &mut self.connections {
-            if send_msg(send, compression, &self.compression_buffer[..len], bytes)
+            if send_msg(send, compression, &self.compression_buffer, bytes)
                 .await
                 .is_err()
             {
@@ -272,8 +279,8 @@ impl<T: P2PMessage> IrohInner<T> {
     pub async fn send(&mut self, peer: EndpointId, compression: Compression, msg: &T) {
         if let Some((_, send)) = self.connections.get_mut(&peer) {
             let bytes = self.buffer.encode(msg);
-            let len = get_bytes(compression, &mut self.compression_buffer, bytes);
-            if send_msg(send, compression, &self.compression_buffer[..len], bytes)
+            get_bytes(compression, &mut self.compression_buffer, bytes);
+            if send_msg(send, compression, &self.compression_buffer, bytes)
                 .await
                 .is_err()
             {
@@ -283,15 +290,23 @@ impl<T: P2PMessage> IrohInner<T> {
         }
     }
 }
-fn get_bytes(compression: Compression, compression_buffer: &mut Vec<u8>, bytes: &[u8]) -> usize {
+fn get_bytes(compression: Compression, compression_buffer: &mut Vec<u8>, bytes: &[u8]) {
     match compression {
-        Compression::Compressed => {
-            compression_buffer.clear();
+        Compression::Compressed | Compression::TestCompression => {
             let max_len = get_maximum_output_size(bytes.len());
             compression_buffer.resize(max_len, 0);
-            lz4_flex::compress_into(bytes, &mut compression_buffer[0..max_len]).unwrap()
+            let new_len = lz4_flex::compress_into(bytes, compression_buffer).unwrap();
+            compression_buffer.truncate(new_len);
+            if matches!(compression, Compression::TestCompression) {
+                info!(
+                    "compression test: {:08}, {:08}, {:04}",
+                    bytes.len(),
+                    compression_buffer.len(),
+                    compression_buffer.len() as f64 / bytes.len() as f64
+                );
+            }
         }
-        Compression::None => 0,
+        Compression::None => {}
     }
 }
 async fn send_msg(
@@ -302,15 +317,15 @@ async fn send_msg(
 ) -> Result<(), WriteError> {
     let len = u32::try_from(bytes.len()).unwrap();
     match compression {
-        Compression::Compressed => {
+        Compression::Compressed | Compression::TestCompression => {
             let compressed_len = u32::try_from(compression_buffer.len()).unwrap();
-            send.write_all(&[1]).await?;
+            send.write_all(&[MESSAGE_COMPRESSED]).await?;
             send.write_all(compressed_len.as_bytes()).await?;
-            send.write_all(len.as_bytes()).await?;
             send.write_all(compression_buffer).await?;
+            send.write_all(len.as_bytes()).await?;
         }
         Compression::None => {
-            send.write_all(&[0]).await?;
+            send.write_all(&[MESSAGE_UNCOMPRESSED]).await?;
             send.write_all(len.as_bytes()).await?;
             send.write_all(bytes).await?;
         }
@@ -387,28 +402,17 @@ async fn receive_messege<'a, T: Decode<'a>>(
     compression_buffer: &'a mut Vec<u8>,
 ) -> Result<T, ReadExactError> {
     let is_compressed = read_u8(recv).await?;
+    let len = read_u32(recv).await? as usize;
+    recv_buffer.resize(len, 0);
+    recv.read_exact(recv_buffer).await?;
     Ok(match is_compressed {
-        0 => {
-            let len = read_u32(recv).await? as usize;
-            recv_buffer.resize(len, 0);
-            recv.read_exact(&mut recv_buffer[..len]).await?;
-            buffer.decode(&recv_buffer[..len]).unwrap()
-        }
-        1 => {
-            let len = read_u32(recv).await? as usize;
+        MESSAGE_UNCOMPRESSED => buffer.decode(recv_buffer).unwrap(),
+        MESSAGE_COMPRESSED => {
             let uncompressed_len = read_u32(recv).await? as usize;
-            recv_buffer.resize(len, 0);
             compression_buffer.resize(uncompressed_len, 0);
-            recv.read_exact(&mut recv_buffer[..len]).await?;
-            let uncompressed = lz4_flex::decompress_into(
-                &recv_buffer[..len],
-                &mut compression_buffer[..uncompressed_len],
-            )
-            .unwrap();
+            let uncompressed = lz4_flex::decompress_into(recv_buffer, compression_buffer).unwrap();
             assert_eq!(uncompressed, uncompressed_len);
-            buffer
-                .decode(&compression_buffer[..uncompressed_len])
-                .unwrap()
+            buffer.decode(compression_buffer).unwrap()
         }
         _ => unreachable!(),
     })
