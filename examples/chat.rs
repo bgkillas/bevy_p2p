@@ -5,6 +5,7 @@ use bevy_ecs::message::PopulatedMessageReader;
 use bevy_ecs::observer::On;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::{Commands, Local, Res};
+use bevy_log::LogPlugin;
 use bevy_p2p::bitcode::{Decode, Encode};
 use bevy_p2p::events::{Binded, ConnectFailed, PeerConnected, PeerDisconnected};
 use bevy_p2p::iroh::EndpointId;
@@ -18,7 +19,6 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
-use bevy_log::LogPlugin;
 const ALPN: &[u8] = b"bevy_p2p_chat";
 #[derive(Resource)]
 struct Lines {
